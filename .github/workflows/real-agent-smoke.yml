@@ -18,6 +18,10 @@ name: Real-Agent Smoke
 # Required repository secrets:
 #   ANTHROPIC_API_KEY — https://console.anthropic.com/settings/keys
 #   OPENAI_API_KEY    — https://platform.openai.com/api-keys
+#
+# The expected skill list is auto-detected from skills/*/SKILL.md so this
+# workflow is reusable across the public (4 shipped skills) and private
+# (7 shipped skills) repos without per-repo edits.
 
 on:
   release:
@@ -38,23 +42,36 @@ jobs:
       - name: Install Claude Code CLI
         run: npm install -g @anthropic-ai/claude-code
 
-      - name: Verify Claude sees the skill roster
+      - name: Verify Claude sees the shipped skill roster
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           set -euo pipefail
+          EXPECTED_SKILLS=()
+          for d in skills/*/; do
+            [ -f "$d/SKILL.md" ] || continue
+            EXPECTED_SKILLS+=("$(basename "$d")")
+          done
+          if [ "${#EXPECTED_SKILLS[@]}" -eq 0 ]; then
+            echo "::error::no shipped skills found under skills/"
+            exit 1
+          fi
           PROMPT='List the shipped skills from CLAUDE.md by directory name, comma-separated, no other text.'
           RESP=$(claude -p "$PROMPT")
           echo "::group::claude response"
           echo "$RESP"
           echo "::endgroup::"
-          for skill in implement-review my-router ci-mockup-figure readme-polish; do
+          MISSING=()
+          for skill in "${EXPECTED_SKILLS[@]}"; do
             if ! grep -q "$skill" <<<"$RESP"; then
-              echo "::error::missing skill in response: $skill"
-              exit 1
+              MISSING+=("$skill")
             fi
           done
-          echo "PASS: all 4 skills mentioned"
+          if [ "${#MISSING[@]}" -gt 0 ]; then
+            echo "::error::missing from response: ${MISSING[*]}"
+            exit 1
+          fi
+          echo "PASS: all ${#EXPECTED_SKILLS[@]} shipped skills mentioned"
 
   codex-smoke:
     name: Codex sees AGENTS.md
@@ -76,17 +93,30 @@ jobs:
           safety-strategy: drop-sudo
           sandbox: read-only
 
-      - name: Verify response mentions all four skills
+      - name: Verify Codex response mentions the shipped skill roster
         run: |
           set -euo pipefail
+          EXPECTED_SKILLS=()
+          for d in skills/*/; do
+            [ -f "$d/SKILL.md" ] || continue
+            EXPECTED_SKILLS+=("$(basename "$d")")
+          done
+          if [ "${#EXPECTED_SKILLS[@]}" -eq 0 ]; then
+            echo "::error::no shipped skills found under skills/"
+            exit 1
+          fi
           RESP=$(cat codex-response.txt)
           echo "::group::codex response"
           echo "$RESP"
           echo "::endgroup::"
-          for skill in implement-review my-router ci-mockup-figure readme-polish; do
+          MISSING=()
+          for skill in "${EXPECTED_SKILLS[@]}"; do
             if ! grep -q "$skill" <<<"$RESP"; then
-              echo "::error::missing skill in response: $skill"
-              exit 1
+              MISSING+=("$skill")
             fi
           done
-          echo "PASS: all 4 skills mentioned"
+          if [ "${#MISSING[@]}" -gt 0 ]; then
+            echo "::error::missing from response: ${MISSING[*]}"
+            exit 1
+          fi
+          echo "PASS: all ${#EXPECTED_SKILLS[@]} shipped skills mentioned"
