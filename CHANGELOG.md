@@ -11,6 +11,30 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 _No unreleased changes queued._
 
+## [0.1.6] — 2026-04-17
+
+Fork-friendly bootstrap — pass your upstream as the bootstrap argv, env var, or persisted file. Forkers no longer have to edit bootstrap scripts to point consumers at their fork; one command per consumer now carries the upstream for the life of that project. Also fixes a session-start-banner suppression by `superpowers` and a stale-origin bug on subsequent runs.
+
+### Added
+
+- **Upstream cascade in `bootstrap/bootstrap.{ps1,sh}`.** Resolution order is argv > env var (`AGENT_CONFIG_UPSTREAM`) > persisted file (`.agent-config/upstream`) > hardcoded default. Whichever value resolves is persisted to `.agent-config/upstream`, so any of the three entrypoints seeds the consumer's long-term upstream choice — you only pass it once per consumer project. Setting the env var on a later run updates the persisted value for all subsequent hook-triggered runs; it is not transient.
+- **Fork instructions in the README now include the concrete install command** with the `<your-user>/<your-repo>` argv, in both Bash and PowerShell.
+
+### Changed
+
+- **Curl and `git clone` URLs inside bootstrap scripts are now parameterized** against the resolved upstream instead of hardcoded. The hardcoded default remains `yzhao062/anywhere-agents`, so consumers who never pass argv / env var / persisted file behave identically to 0.1.5.
+
+### Fixed
+
+- **Banner rule in `AGENTS.md` Session Start Check now explicitly overrides any skill's "invoke before responding" rule.** When a plugin like `superpowers:using-superpowers` fired a skill (e.g. `brainstorming`) as the first action on turn 1, the banner was silently dropped and replaced by the skill's output. The updated rule makes banner-first mandatory and allows the skill to run on the same turn after the banner text.
+- **Sparse-clone origin now follows the resolved upstream on every run.** Prior versions only used the resolved upstream for the initial `git clone`; on subsequent runs (hook-triggered refreshes after an argv/env-var upstream switch), `git pull` fetched against whatever `origin` was set at first clone, so AGENTS.md came from the new upstream but skills/hooks/settings came from the old one. Both scripts now `git remote set-url origin "$REPO_URL"` before pulling.
+- **Bash cascade tolerates an empty persisted upstream file.** If `.agent-config/upstream` exists but is empty (e.g. after a failed or interrupted write), resolution now falls through to the hardcoded default instead of producing a malformed URL. PowerShell already handled this via `Trim()`.
+
+### Compatibility
+
+- Existing consumers on 0.1.5 caches: self-update pulls the 0.1.6 bootstrap on next session. With no argv, env var, or persisted upstream file, the cascade falls through to the same hardcoded default, so behavior is unchanged. No user action required.
+- Forkers: stop editing URLs inside bootstrap scripts. Tell consumers to install with `bash .agent-config/bootstrap.sh <your-user>/<your-repo>` (or the PowerShell equivalent).
+
 ## [0.1.5] — 2026-04-17
 
 Bootstrap self-update — cached `.agent-config/bootstrap.{ps1,sh}` now copies itself forward from the sparse clone at the end of every run, so future bootstrap improvements reach existing consumers without a manual re-download.
@@ -234,7 +258,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.1.6
 [0.1.5]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.1.5
 [0.1.4]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.1.4
 [0.1.3]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.1.3

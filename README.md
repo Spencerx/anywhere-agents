@@ -215,7 +215,22 @@ Want to diverge — change writing defaults, add skills, swap the reviewer? Stan
 
 1. **Fork** `yzhao062/anywhere-agents` to your GitHub account.
 2. **Edit:** `AGENTS.md`, `skills/<your-skill>/`, `skills/my-router/references/routing-table.md`.
-3. **Repoint consumers** at your fork (change the URL in their bootstrap block).
+3. **Point consumers at your fork.** Pass your upstream as the bootstrap argv on first install:
+
+    ```bash
+    # Bash (macOS / Linux / Git Bash)
+    curl -sfL https://raw.githubusercontent.com/<your-user>/<your-repo>/main/bootstrap/bootstrap.sh -o .agent-config/bootstrap.sh
+    bash .agent-config/bootstrap.sh <your-user>/<your-repo>
+    ```
+
+    ```powershell
+    # PowerShell (Windows)
+    Invoke-WebRequest -UseBasicParsing -Uri https://raw.githubusercontent.com/<your-user>/<your-repo>/main/bootstrap/bootstrap.ps1 -OutFile .agent-config/bootstrap.ps1
+    & .\.agent-config\bootstrap.ps1 <your-user>/<your-repo>
+    ```
+
+    Whichever value you pass (argv or `AGENT_CONFIG_UPSTREAM` env var) is persisted to `.agent-config/upstream` on that run, so later session-hook invocations pick it up automatically; you only pass it once per consumer project. Setting the env var on a later run updates the persisted value, so the env var can both seed and change the long-term upstream.
+
 4. **Pull upstream updates when you want them:**
 
     ```bash
