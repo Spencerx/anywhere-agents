@@ -6,9 +6,9 @@
 
 # anywhere-agents
 
-**一次配置，处处生效的 AI 智能体。**
+**一份配置，统领所有 AI 智能体：可移植、有效、更安全。**
 
-为 Claude Code 和 Codex 维护的一套有主见的配置——跨项目、跨机器、跨会话，随你而行。
+一套维护中的有主见配置，跨项目、跨机器、跨会话随你而行。当前支持 Claude Code 和 Codex，计划扩展更多。
 
 [![PyPI](https://img.shields.io/pypi/v/anywhere-agents?color=990000&label=PyPI)](https://pypi.org/project/anywhere-agents/)
 [![npm](https://img.shields.io/npm/v/anywhere-agents?color=990000&label=npm)](https://www.npmjs.com/package/anywhere-agents)
@@ -24,7 +24,7 @@
 
 </div>
 
-![anywhere-agents — 六项有主见的默认设置：高调的安全防护、双智能体审查、一致的写作风格、技能自动分派、Git 安全、Shell 习惯](docs/hero.png)
+![anywhere-agents：一份配置，统领所有 AI 智能体：可移植、有效、更安全](docs/hero.png)
 
 > [!NOTE]
 > **浓缩自日常使用。** 这是我自 2026 年初以来，在科研、论文写作和开发工作（PyOD 3、LaTeX、行政文书）中，跨 macOS、Windows、Linux 每天使用的智能体配置的脱敏公开版本。不是周末项目。由 [Yue Zhao](https://yzhao062.github.io) 维护——USC 计算机系教员，[PyOD](https://github.com/yzhao062/pyod) 作者（9.8k★ · 38M+ 下载 · ~12k 研究引用）。

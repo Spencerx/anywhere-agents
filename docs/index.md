@@ -1,12 +1,12 @@
 # anywhere-agents
 
 <p align="center">
-  <img src="hero.png" alt="anywhere-agents — six opinionated defaults: loud safety, dual-agent review, consistent writing, skill auto-dispatch, Git safety, shell hygiene" width="100%">
+  <img src="hero.png" alt="anywhere-agents. One config to rule all your AI agents: portable, effective, safer." width="100%">
 </p>
 
-**Your AI agents, configured once and running everywhere.**
+**One config to rule all your AI agents: portable, effective, safer.**
 
-A maintained, opinionated configuration for Claude Code and Codex that follows you across every project, every machine, every session.
+A maintained, opinionated configuration that follows you across every project, every machine, every session. Supports Claude Code and Codex today, with plans to grow.
 
 This site is the motivated-reader reference. For the scenario-first quick start, see the [README on GitHub](https://github.com/yzhao062/anywhere-agents).
 

@@ -6,9 +6,9 @@
 
 # anywhere-agents
 
-**Your AI agents, configured once and running everywhere.**
+**One config to rule all your AI agents: portable, effective, safer.**
 
-A maintained, opinionated configuration for Claude Code and Codex that follows you across every project, every machine, every session.
+A maintained, opinionated configuration that follows you across every project, every machine, every session. Supports Claude Code and Codex today, with plans to grow.
 
 [![PyPI](https://img.shields.io/pypi/v/anywhere-agents?color=990000&label=PyPI)](https://pypi.org/project/anywhere-agents/)
 [![npm](https://img.shields.io/npm/v/anywhere-agents?color=990000&label=npm)](https://www.npmjs.com/package/anywhere-agents)
@@ -24,7 +24,7 @@ A maintained, opinionated configuration for Claude Code and Codex that follows y
 
 </div>
 
-![anywhere-agents — six opinionated defaults: loud safety, dual-agent review, consistent writing, skill auto-dispatch, Git safety, shell hygiene](docs/hero.png)
+![anywhere-agents. One config to rule all your AI agents: portable, effective, safer.](docs/hero.png)
 
 > [!NOTE]
 > **Condensed from daily use.** The sanitized public release of the agent config I have run daily since early 2026 across research, paper writing, and dev work (PyOD 3, LaTeX, admin) on macOS, Windows, and Linux. Not a weekend project. Maintained by [Yue Zhao](https://yzhao062.github.io) — USC CS faculty and author of [PyOD](https://github.com/yzhao062/pyod) (9.8k★ · 38M+ downloads · ~12k citations).
