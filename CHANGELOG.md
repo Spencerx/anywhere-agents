@@ -9,6 +9,8 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
+_No unreleased changes queued._
+
 ## [0.2.0] — 2026-04-18
 
 README and RTD redesign on top of the plan-first workflow in `implement-review`. The README is re-centered around three pillars (portable sync, review workflow, mechanical enforcement) earned from daily use, and the 0.1.8 PreToolUse gates are surfaced as a first-class feature via a reframed Scenario D covering four reader-facing gate families. The RTD `/skills/` rendering bug (Material icon shortcodes showing as literal text) is fixed.
