@@ -57,9 +57,34 @@ git diff --name-only HEAD~1 HEAD -- README.md README.zh-CN.md
 #    diffing each shared path between the two local clones (e.g. `diff -q AGENTS.md ../agent-config/AGENTS.md`
 #    tolerates the expected default-upstream string differences but should otherwise flag the same
 #    structural changes).
+
+# 6. Dual-OS local test: run the full suite on a Linux machine via SSH before tagging.
+#    Windows-only local coverage misses POSIX-specific behavior (HOME vs USERPROFILE, path
+#    separators, case sensitivity, symlinks, shell tooling). The Spark release-gate box
+#    (ARM64 Ubuntu) is the maintainer's Linux target. CI runs on x86_64 Ubuntu workers, so
+#    Spark adds ARM64 + a separate filesystem layout to the matrix.
+#
+#    The shared-core files that need Linux validation (scripts/guard.py, scripts/session_bootstrap.py,
+#    tests/test_guard.py, bootstrap/bootstrap.sh) are byte-identical between agent-config and
+#    anywhere-agents, so cloning EITHER repo on Spark and running its test suite validates the
+#    code that will ship in both. Using the private agent-config clone is convenient because it
+#    is where the shared-core Python tests live (anywhere-agents inherits the identical tests
+#    via cross-repo parity check #5 above).
+ssh yzhao062@spark-37f2.local '
+  if [ -d ~/agent-config ]; then
+    git -C ~/agent-config pull --ff-only
+  else
+    git clone https://github.com/yzhao062/agent-config.git ~/agent-config
+  fi
+  cd ~/agent-config && python3 -B -m unittest discover -s tests -p "test_*.py" 2>&1 | tail -5
+'
+# Must report "OK" (any number of passes, skipped allowed). If not, stop and investigate on Spark
+# before tagging. Typical failures: Linux-specific path handling in new hook logic, shell script
+# syntax that Git Bash on Windows tolerated but POSIX sh rejects, or a test that hardcoded a
+# Windows drive letter / backslash.
 ```
 
-If any of the five checks fail, stop and fix before continuing.
+If any of the six checks fail, stop and fix before continuing.
 
 ## Real-agent smoke tests
 

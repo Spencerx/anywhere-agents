@@ -11,6 +11,39 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 _No unreleased changes queued._
 
+## [0.1.8] — 2026-04-17
+
+Mechanical enforcement upgrade. Adds two `PreToolUse` gates to `scripts/guard.py` (deployed to `~/.claude/hooks/guard.py` by bootstrap) so that writing-style rules and the session-start banner are now enforced by hooks, not just prompt-level compliance. Session banner also re-emits on resume / compact / clear via a flag-file mechanism. Closes multiple observed gaps where 0.1.7's rules were skipped in practice.
+
+### Added
+
+- **Writing-style gate in `scripts/guard.py`.** `PreToolUse` hook now denies any `Write` / `Edit` / `MultiEdit` to `.md` / `.tex` / `.rst` / `.txt` files when the outgoing content contains a banned AI-tell word from `AGENTS.md` Writing Defaults. The deny message lists the offending words so the agent can revise. Code files (`.py`, `.js`, etc.) are not checked — banned words rarely appear naturally in code, and docstring false positives would be a usability regression. Close-variant matching via word boundaries.
+- **Banner emission gate in `scripts/guard.py`.** `PreToolUse` hook now denies any tool call (other than `Read`, `Grep`, `Glob`, or a `Write` to `~/.claude/hooks/banner-emitted.json`) while `~/.claude/hooks/session-event.json.ts > ~/.claude/hooks/banner-emitted.json.ts` — i.e., while a SessionStart event is pending but the banner has not been emitted for it. Forces the agent to emit the banner before doing real work; the gate lifts after the agent writes the acknowledgment file. Read/Grep/Glob remain exempt so the agent can still inspect state.
+- **`session_bootstrap.py` writes `~/.claude/hooks/session-event.json`** on every SessionStart hook fire (fresh startup, resume, clear, compact all produce a fresh timestamp). The file contains a single `{"ts": <unix-ts>}`, overwritten each time. Combined with the banner gate, a fresh SessionStart event mechanically blocks work until the banner is re-emitted.
+- **Dual-runtime turn-start banner procedure in `AGENTS.md`.**
+  - *Claude Code branch:* read `session-event.json` and `banner-emitted.json` before each response. If the event timestamp is newer than the emitted timestamp (or only `session-event.json` exists), emit the banner as the literal first content of the response and write the event `ts` into `banner-emitted.json`. The flag-file mechanism covers all four SessionStart lifecycle events; the banner gate in `guard.py` enforces it mechanically.
+  - *Codex branch:* Codex has no `SessionStart` hook equivalent and no guard.py hook runs during a Codex invocation. Each Codex invocation is a new session; emit the banner on the turn with no prior assistant turns in context (the first response of the invocation) and skip on subsequent turns. Enforcement remains prompt-level for Codex.
+- **Mechanical Enforcement section in `AGENTS.md`** documenting the gates, their tool scope, triggers, and actions; plus the `AGENT_CONFIG_GATES=off` escape hatch.
+- **`RELEASING.md` check #6: dual-OS pre-release test.** Maintainer runs the full test suite on the Spark release-gate box (ARM64 Ubuntu) via SSH before tagging, using the shared-core agent-config clone. Windows-only local coverage misses POSIX path handling and shell differences; CI runs x86_64 Ubuntu, so Spark adds ARM64. Command + interpretation documented inline.
+
+### Changed
+
+- **`scripts/guard.py` is no longer Bash-only.** The hook now dispatches by `tool_name`, runs the two new gates first (for tools they cover), and falls through to the existing Bash-only checks (compound-cd, destructive git, destructive gh). Legacy hook payloads without `tool_name` fall through to the Bash path for backward compatibility.
+
+### Fixed
+
+- **Writing-style rules are now enforced, not only prompt-level.** Prior releases listed ~40 banned AI-tell words in `AGENTS.md` Writing Defaults but relied on agent compliance. Observed behavior showed occasional slips. The new writing-style gate blocks at tool-call time so the banned words cannot reach prose files.
+- **Banner fires on task-oriented first prompts.** 0.1.6 addressed `superpowers:using-superpowers` skill-first behavior, but did not cover the plain "user types a task and agent jumps in" case. 0.1.7 sessions still occasionally missed the banner for that reason (observed in a real fresh-session screenshot). The new banner gate + the checklist-style turn-start procedure make the emission unambiguous, and the gate mechanically blocks any tool-based progress until the banner lands.
+- **Banner re-appears on resume / compact / clear in Claude Code**, not only on turn 1 of a fresh conversation. SessionStart hook fires on all four lifecycle events; the flag-file mechanism + banner gate now route each event into a fresh banner emission.
+
+### Escape hatch
+
+Set `AGENT_CONFIG_GATES=off` (or `0` / `disabled` / `false` / `no`) via the `env` block in `~/.claude/settings.json` to disable the two new gates. The compound-cd / destructive-git / destructive-gh checks remain active. Useful when working on meta-documentation that quotes banned words as examples, or to bypass a false positive while a real fix is in flight.
+
+### Compatibility
+
+- Existing consumers on 0.1.7 caches: self-update pulls the 0.1.8 bootstrap on next session. The updated `session_bootstrap.py` starts writing `session-event.json` on every SessionStart fire; the updated `AGENTS.md` rule takes effect on the next session after bootstrap. No user action required.
+
 ## [0.1.7] — 2026-04-17
 
 Session-start banner now surfaces Claude Code + Codex version status (current → latest + auto-update state). Bootstrap heals a Claude Code auto-update gotcha left over from npm/winget-era installs.
@@ -293,7 +326,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.1.7...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.1.8...HEAD
+[0.1.8]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.1.8
 [0.1.7]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.1.7
 [0.1.6]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.1.6
 [0.1.5]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.1.5
