@@ -66,6 +66,8 @@ your-project/
 └── .agent-config/         # upstream cache (auto-gitignored)
 ```
 
+The composed `AGENTS.md` includes the [`agent-style`](https://github.com/yzhao062/agent-style) writing rule pack by default (21 rules covering banned AI-tell vocabulary, dash usage, and formatting). Rule packs are always-on content that lives inside `AGENTS.md`; skills are on-demand and live under `.claude/commands/`. Scenario F covers how to pin a version, swap the pack, or turn it off.
+
 Git is the subscription engine. `git pull` gets updates. Fork and `git merge upstream/main` if you want to diverge.
 
 ### B. Review before you push
@@ -106,7 +108,7 @@ _Three sentences. 33 words. Zero banned words. Semicolons and colons instead of 
 
 The shared `AGENTS.md` bans ~40 AI-tell words by default (`delve`, `pivotal`, `underscore`, `paramount`, `paving`, `groundbreaking`, `trailblazing`, `garner`, `unprecedented`, `burgeoning`, and more). It preserves your format (LaTeX stays LaTeX, no bullet conversion of prose), avoids em-dashes as casual punctuation, and does not glue a summary sentence to the end of every paragraph. The ban is enforced by a PreToolUse hook on `.md`/`.tex`/`.rst`/`.txt` writes; Scenario D covers the mechanism.
 
-Customize the banned list in your fork, or override per project in `AGENTS.local.md`.
+Customize the banned list in your fork, or override per project in `AGENTS.local.md`. The 21-rule `agent-style` pack ships enabled by default and extends these defaults; Scenario F covers how to swap, pin, or disable it.
 
 ### D. Mechanical enforcement
 
@@ -159,6 +161,55 @@ You would have to read a dozen docs pages to discover these individually. `anywh
 *Every session starts with this banner: current and latest versions of Claude Code and Codex (arrows appear only on drift), auto-update state, active skills, hooks, and any drift the session check found.*
 
 Most users are running suboptimal defaults without knowing. This is the upgrade they did not look up.
+
+### F. Swap or disable the writing rules
+
+The writing discipline from Scenario C ships as the **`agent-style`** rule pack: an always-on instruction bundle composed into your `AGENTS.md` at bootstrap time, alongside the base configuration and the on-demand skills. Every bootstrap fetches `agent-style`'s canonical Markdown at a pinned git ref, validates it, and injects it inside a delimited block of the composed `AGENTS.md`.
+
+```text
+<!-- rule-pack:agent-style:begin version=v0.3.2 sha256=... -->
+...agent-style rules body (21 rules)...
+<!-- rule-pack:agent-style:end -->
+```
+
+**Composition is soft-dependency.** Rule-pack composition needs Python 3 + PyYAML. If PyYAML is missing, bootstrap attempts `pip install --user pyyaml` on your behalf; if Python or PyYAML still is not available, bootstrap writes the verbatim upstream `AGENTS.md` (no rule packs) plus a one-line tip. Bootstrap never hard-errors on missing dependencies.
+
+**Opt out** — add `rule_packs: []` to `agent-config.yaml` at your project root and commit it:
+
+```yaml
+# agent-config.yaml
+rule_packs: []
+```
+
+**Pin a version or swap the pack** — use an explicit `rule_packs:` list:
+
+```yaml
+# agent-config.yaml
+rule_packs:
+  - name: agent-style
+    ref: v0.3.2       # optional; defaults to the manifest's default-ref
+  # - name: your-fork-pack    # swap in your own, or add a second pack
+```
+
+`agent-config.local.yaml` (gitignored machine-local) overrides `agent-config.yaml` for per-developer experimentation; `AGENT_CONFIG_RULE_PACKS` env var adds transient packs for a single run without touching any file.
+
+**Dry helper** — print the YAML snippet without running bootstrap:
+
+```bash
+bash .agent-config/bootstrap.sh --rule-packs agent-style
+# PowerShell: & .\.agent-config\bootstrap.ps1 -RulePacks agent-style
+```
+
+For the full contract (manifest schema, cache + offline semantics, failure modes, routing-marker validation, how to register a second pack), see [`docs/rule-pack-composition.md`](docs/rule-pack-composition.md).
+
+<details>
+<summary><b>Historical naming: why the scratch directory is <code>.agent-config/</code></b></summary>
+
+The consumer-repo scratch directory is called `.agent-config/`. The name is historical: it came from the private source repo `agent-config`, which was the original canonical source for the shared content. Consumers of `anywhere-agents` see the name `.agent-config/` even though they are using `anywhere-agents`, not the private source. New config files added by the rule-pack feature follow the same historical prefix for consistency: `agent-config.yaml` (tracked, at consumer repo root) and `agent-config.local.yaml` (gitignored, machine-local override).
+
+A rename was considered and scoped during the rule-pack design (around 30 files / 292 occurrences across the repo plus a graceful-migration story for existing consumers). The cost-to-benefit did not pencil out at the project's current scale; the historical name stays.
+
+</details>
 
 ## Install
 

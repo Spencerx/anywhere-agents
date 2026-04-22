@@ -115,28 +115,26 @@ else
 fi
 git -C .agent-config/repo sparse-checkout set skills .claude scripts user bootstrap
 
-# Compose root AGENTS.md. On opt-in (agent-config.yaml or agent-config.local.yaml
-# declaring rule_packs:, or AGENT_CONFIG_RULE_PACKS env var set), invoke the
-# Python composer which writes AGENTS.md atomically. Otherwise copy verbatim.
-_rp_optin=false
-if [ -f agent-config.yaml ] && grep -qE '^rule_packs:' agent-config.yaml 2>/dev/null; then
-  _rp_optin=true
-elif [ -f agent-config.local.yaml ] && grep -qE '^rule_packs:' agent-config.local.yaml 2>/dev/null; then
-  _rp_optin=true
-elif [ -n "${AGENT_CONFIG_RULE_PACKS:-}" ]; then
-  _rp_optin=true
+# Compose root AGENTS.md. Default-on: every aa consumer gets the agent-style
+# writing rule pack unless they explicitly opt out via `rule_packs: []` in
+# agent-config.yaml. Composition requires Python 3 + PyYAML; when PyYAML is
+# missing we attempt a best-effort `pip install --user pyyaml`. If Python or
+# PyYAML still aren't available, we fall back to the verbatim upstream
+# AGENTS.md and print a one-line tip unless the consumer has explicitly
+# referenced rule_packs themselves.
+_py=$(command -v python3 || command -v python)
+_compose_ok=false
+if [ -n "$_py" ]; then
+  if ! "$_py" -c "import yaml" >/dev/null 2>&1; then
+    printf 'installing PyYAML (enables agent-style rule-pack composition)...\n' >&2
+    "$_py" -m pip install --user --quiet pyyaml || true
+  fi
+  if "$_py" -c "import yaml" >/dev/null 2>&1; then
+    _compose_ok=true
+  fi
 fi
 
-if $_rp_optin; then
-  _py=$(command -v python3 || command -v python)
-  if [ -z "$_py" ]; then
-    echo "error: Python 3 required for rule-pack opt-in; install Python or remove rule_packs from agent-config.yaml" >&2
-    exit 1
-  fi
-  if ! "$_py" -c "import yaml" >/dev/null 2>&1; then
-    echo "error: PyYAML required for rule-pack opt-in; run 'pip install pyyaml' or remove rule_packs from agent-config.yaml" >&2
-    exit 1
-  fi
+if $_compose_ok; then
   _NO_CACHE_FLAG=""
   [ -n "$NO_CACHE" ] && _NO_CACHE_FLAG="--no-cache"
   # shellcheck disable=SC2086
@@ -146,6 +144,20 @@ if $_rp_optin; then
   fi
 else
   cp -f .agent-config/AGENTS.md AGENTS.md
+  _rp_aware=false
+  if [ -f agent-config.yaml ] && grep -qE '^rule_packs:' agent-config.yaml 2>/dev/null; then
+    _rp_aware=true
+  elif [ -f agent-config.local.yaml ] && grep -qE '^rule_packs:' agent-config.local.yaml 2>/dev/null; then
+    _rp_aware=true
+  elif [ -n "${AGENT_CONFIG_RULE_PACKS:-}" ]; then
+    _rp_aware=true
+  fi
+  if ! $_rp_aware; then
+    printf '\n' >&2
+    printf 'tip: anywhere-agents ships with agent-style writing rules enabled by default,\n' >&2
+    printf '     but this run skipped them (Python 3 with PyYAML unavailable).\n' >&2
+    printf "     install Python + PyYAML to enable, or silence with 'rule_packs: []' in agent-config.yaml.\n" >&2
+  fi
 fi
 # Generate per-agent config files (CLAUDE.md, agents/codex.md) from AGENTS.md.
 # Generator preserves hand-authored files (no GENERATED header) and warns loudly.

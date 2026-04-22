@@ -11,6 +11,22 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 _No unreleased changes queued._
 
+## [0.3.0] — 2026-04-21
+
+### Added
+
+- **Rule-pack composition in bootstrap.** Bootstrap can now stitch external always-on instruction bundles ("rule packs") into the composed `AGENTS.md` at install time. First rule pack: [`agent-style`](https://github.com/yzhao062/agent-style) (21 writing rules, pinned at `v0.3.2`), enabled by default. Consumers opt out with `rule_packs: []` in `agent-config.yaml` at the project root; customize with `rule_packs: - name: agent-style` plus optional `ref:`, or layer with `agent-config.local.yaml` (gitignored machine-local override) or `AGENT_CONFIG_RULE_PACKS` env var (transient one-run). Composition requires Python 3 + PyYAML; bootstrap attempts a best-effort `pip install --user pyyaml` when missing, and falls back to the verbatim upstream `AGENTS.md` plus a one-line tip when Python or PyYAML still are not available — no hard error. Covers the `bash` and `powershell` bootstrap paths symmetrically with matching CLI contracts (`--rule-packs PACK` dry helper, `--no-cache` refetch flag, `--help` usage).
+- **`bootstrap/rule-packs.yaml` manifest** registering known rule packs. Adding a second rule pack is a PR that adds a manifest entry plus the pack author publishing `docs/rule-pack.md` at a stable git ref.
+- **`scripts/compose_rule_packs.py` helper** implementing manifest parsing, config resolution across the four opt-in layers (tracked / local / env / dry helper flag), raw-GitHub fetch with SHA-256 cache, routing-marker validation regex as conservative superset of the per-agent generator grammar, and atomic temp-plus-rename write of the composed `AGENTS.md`.
+- **`tests/test_compose_rule_packs.py`** with 90+ tests covering parser, composition golden-file, cache semantics (fetch-first / fallback / `--no-cache` always errors), path-traversal regression (user-controlled ref percent-encoded in cache filename), PyYAML-missing fallback, and CLI contracts for both `bootstrap.sh` and `bootstrap.ps1`.
+- **`docs/rule-pack-composition.md`** long-form spec: rule-pack vs skill-pack layering, default behavior, opt-in precedence, pack-author anatomy, composition flow, manifest schema, dependency contract, cache and offline behavior, failure modes, registration process, and a note on the historical `.agent-config/` scratch directory name.
+- **README `Rule packs` section** with opt-out, pin-ref, dry-helper recipes, plus a collapsible Historical naming block.
+
+### Changed
+
+- **`bootstrap/bootstrap.sh` and `bootstrap/bootstrap.ps1` reordered the sparse clone** to happen before the root `AGENTS.md` write so the composer helper and manifest are available inside `.agent-config/repo/` at compose time. Runs that set `rule_packs: []` as an explicit opt-out, or that fall back because Python / PyYAML are unavailable, still receive a verbatim upstream `AGENTS.md`; the default no-config path now attempts rule-pack composition.
+- **`agent-config.local.yaml` auto-gitignored** alongside `.agent-config/` on every bootstrap run, so machine-local rule-pack overrides do not leak into commits.
+
 ## [0.2.0] — 2026-04-18
 
 README and RTD redesign on top of the plan-first workflow in `implement-review`. The README is re-centered around three pillars (portable sync, review workflow, mechanical enforcement) earned from daily use, and the 0.1.8 PreToolUse gates are surfaced as a first-class feature via a reframed Scenario D covering four reader-facing gate families. The RTD `/skills/` rendering bug (Material icon shortcodes showing as literal text) is fixed.
@@ -387,7 +403,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/yzhao062/anywhere-agents/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.2.0
 [0.1.9]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.1.9
 [0.1.8]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.1.8

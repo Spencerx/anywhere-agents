@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Rule-pack composer for anywhere-agents bootstrap.
 
-Invoked from bootstrap.sh and bootstrap.ps1 when the consumer opts into
-rule-pack composition via:
+Invoked by bootstrap.sh and bootstrap.ps1 by default whenever Python 3
+and PyYAML are both available: under the default-on policy, the composer
+applies an internal default selection (currently [agent-style]) when the
+consumer has provided no explicit signal. Consumers can override the
+selection via:
   - agent-config.yaml at the consumer repo root (tracked, durable)
   - agent-config.local.yaml at the consumer repo root (gitignored)
   - AGENT_CONFIG_RULE_PACKS environment variable (transient one-run)
+  - rule_packs: [] in agent-config.yaml — explicit opt-out
 
 Fetches each rule pack's docs/rule-pack.md at its pinned git ref, validates
 against the per-agent routing-marker grammar, and composes the upstream
@@ -13,8 +17,10 @@ AGENTS.md (already fetched by bootstrap at .agent-config/AGENTS.md) with
 delimited rule-pack blocks. Writes the composed result atomically to the
 consumer repo's AGENTS.md so the on-disk file is never partial.
 
-The no-opt-in bootstrap path does not call this helper; that path remains
-shell-only and does not require Python.
+When Python or PyYAML is unavailable, bootstrap does NOT call this helper
+and falls back to writing the verbatim upstream AGENTS.md plus a tip.
+Explicit opt-out via `rule_packs: []` is honored by this helper (it
+writes the verbatim upstream to AGENTS.md under that signal).
 """
 from __future__ import annotations
 
@@ -50,6 +56,12 @@ REF_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 BEGIN_FMT = "<!-- rule-pack:{name}:begin version={ref} sha256={sha} -->"
 END_FMT = "<!-- rule-pack:{name}:end -->"
+
+# Default rule-pack selections applied when the consumer provides no
+# explicit signal (no agent-config.yaml, no agent-config.local.yaml, no
+# AGENT_CONFIG_RULE_PACKS env var). Consumers opt out with an explicit
+# empty `rule_packs: []` in agent-config.yaml.
+DEFAULT_SELECTIONS: list[dict[str, Any]] = [{"name": "agent-style"}]
 
 
 class RulePackError(RuntimeError):
@@ -92,24 +104,35 @@ def parse_manifest(path: Path) -> dict[str, dict[str, Any]]:
     return packs
 
 
-def parse_user_config(path: Path) -> list[dict[str, Any]]:
+def parse_user_config(path: Path) -> list[dict[str, Any]] | None:
     """Parse agent-config.yaml or agent-config.local.yaml.
 
-    Returns a list of pack selection dicts. Missing file returns [].
+    Return value distinguishes three cases:
+      - None: no signal. The file is absent, empty, or present without a
+        top-level `rule_packs` key. The composer applies DEFAULT_SELECTIONS
+        unless another source signals.
+      - []: explicit opt-out. The file has `rule_packs: []` or
+        `rule_packs:` with a null value. The composer respects this and
+        applies no rule packs.
+      - [dict, ...]: explicit selections from the user.
     """
     if not path.exists():
-        return []
+        return None
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as e:
         raise RulePackError(f"malformed user config {path}: {e}") from e
     if data is None:
-        return []
+        return None
     if not isinstance(data, dict):
         raise RulePackError(
             f"user config {path} must be a mapping at top level"
         )
-    raw = data.get("rule_packs") or []
+    if "rule_packs" not in data:
+        return None
+    raw = data["rule_packs"]
+    if raw is None:
+        return []
     if not isinstance(raw, list):
         raise RulePackError(
             f"user config {path}: 'rule_packs' must be a list"
@@ -144,19 +167,41 @@ def parse_env_packs(env_val: str) -> list[dict[str, Any]]:
     return [{"name": n} for n in ordered]
 
 
-def merge_pack_selections(
-    tracked: list[dict[str, Any]],
-    local: list[dict[str, Any]],
-    env: list[dict[str, Any]],
+def resolve_selections(
+    tracked: list[dict[str, Any]] | None,
+    local: list[dict[str, Any]] | None,
+    env_list: list[dict[str, Any]],
+    default: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Merge pack selections from the three opt-in sources.
+    """Resolve effective pack selections from the three opt-in sources.
 
-    Precedence: local overrides tracked by name (for ref override);
-    env adds transient packs on top of the config-file base for this run.
+    Signal semantics (from parse_user_config):
+      None = no signal (file absent, or no `rule_packs` key).
+      []   = explicit opt-out.
+      [..] = explicit selections.
+
+    Precedence (durable to transient):
+      - tracked base: agent-config.yaml at repo root
+      - local override: agent-config.local.yaml (overrides tracked by
+        name for ref or other fields)
+      - env additive: AGENT_CONFIG_RULE_PACKS env var (adds packs that
+        are not already selected)
+
+    If NO source signals (all None / empty-env), return a copy of
+    `default` (typically DEFAULT_SELECTIONS for opinionated installs).
+    An explicit opt-out via tracked=[] or local=[] counts as a signal
+    and suppresses the default.
+
     Duplicate names within a single source: last wins, warning emitted.
     """
+    has_signal = (
+        tracked is not None or local is not None or bool(env_list)
+    )
+    if not has_signal:
+        return [dict(entry) for entry in (default or [])]
+
     base: dict[str, dict[str, Any]] = {}
-    for entry in tracked:
+    for entry in (tracked or []):
         name = entry["name"]
         if name in base:
             sys.stderr.write(
@@ -164,7 +209,7 @@ def merge_pack_selections(
                 f"last entry wins\n"
             )
         base[name] = dict(entry)
-    for entry in local:
+    for entry in (local or []):
         name = entry["name"]
         if name in base:
             merged = dict(base[name])
@@ -172,7 +217,7 @@ def merge_pack_selections(
             base[name] = merged
         else:
             base[name] = dict(entry)
-    for entry in env:
+    for entry in env_list:
         name = entry["name"]
         if name not in base:
             base[name] = dict(entry)
@@ -332,7 +377,9 @@ def do_compose(root: Path, manifest_path: Path, no_cache: bool) -> int:
         local = parse_user_config(root / "agent-config.local.yaml")
         env_val = os.environ.get("AGENT_CONFIG_RULE_PACKS", "")
         env_list = parse_env_packs(env_val) if env_val else []
-        selections = merge_pack_selections(tracked, local, env_list)
+        selections = resolve_selections(
+            tracked, local, env_list, default=DEFAULT_SELECTIONS
+        )
     except RulePackError as e:
         sys.stderr.write(f"error: {e}\n")
         return 1

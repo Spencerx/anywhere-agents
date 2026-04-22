@@ -141,15 +141,28 @@ class ParseUserConfigTests(unittest.TestCase):
         p.write_text(text, encoding="utf-8")
         return p
 
-    def test_missing_file_returns_empty(self) -> None:
-        self.assertEqual(crp.parse_user_config(self.root / "missing.yaml"), [])
+    def test_missing_file_returns_none(self) -> None:
+        """Missing file = no signal (None)."""
+        self.assertIsNone(crp.parse_user_config(self.root / "missing.yaml"))
 
-    def test_empty_file_returns_empty(self) -> None:
+    def test_empty_file_returns_none(self) -> None:
+        """Empty YAML file = no signal (None)."""
         p = self._config("")
+        self.assertIsNone(crp.parse_user_config(p))
+
+    def test_file_without_rule_packs_key_returns_none(self) -> None:
+        """File with other keys but no rule_packs key = no signal (None)."""
+        p = self._config("some_other_key: value\n")
+        self.assertIsNone(crp.parse_user_config(p))
+
+    def test_null_rule_packs_is_explicit_opt_out(self) -> None:
+        """`rule_packs:` with null value = explicit opt-out ([])."""
+        p = self._config("rule_packs:\n")
         self.assertEqual(crp.parse_user_config(p), [])
 
-    def test_null_rule_packs_returns_empty(self) -> None:
-        p = self._config("rule_packs:\n")
+    def test_empty_list_rule_packs_is_explicit_opt_out(self) -> None:
+        """`rule_packs: []` = explicit opt-out ([])."""
+        p = self._config("rule_packs: []\n")
         self.assertEqual(crp.parse_user_config(p), [])
 
     def test_string_shorthand(self) -> None:
@@ -226,11 +239,47 @@ class ParseEnvPacksTests(unittest.TestCase):
 # ---------- merge_pack_selections ----------
 
 
-class MergeSelectionsTests(unittest.TestCase):
+class ResolveSelectionsTests(unittest.TestCase):
+    def test_no_signal_returns_default(self) -> None:
+        """All None / empty-env → apply default."""
+        default = [{"name": "agent-style"}]
+        self.assertEqual(
+            crp.resolve_selections(None, None, [], default=default),
+            default,
+        )
+
+    def test_no_signal_no_default_returns_empty(self) -> None:
+        """All None / empty-env + no default → []."""
+        self.assertEqual(crp.resolve_selections(None, None, []), [])
+
+    def test_tracked_empty_is_explicit_opt_out(self) -> None:
+        """tracked=[] is a signal; default NOT applied."""
+        default = [{"name": "agent-style"}]
+        self.assertEqual(
+            crp.resolve_selections([], None, [], default=default),
+            [],
+        )
+
+    def test_local_empty_is_explicit_opt_out(self) -> None:
+        """local=[] is a signal; default NOT applied."""
+        default = [{"name": "agent-style"}]
+        self.assertEqual(
+            crp.resolve_selections(None, [], [], default=default),
+            [],
+        )
+
+    def test_env_alone_suppresses_default(self) -> None:
+        """Env var alone is a signal; default NOT applied."""
+        default = [{"name": "agent-style"}]
+        self.assertEqual(
+            crp.resolve_selections(None, None, [{"name": "foo"}], default=default),
+            [{"name": "foo"}],
+        )
+
     def test_tracked_only(self) -> None:
         tracked = [{"name": "a", "ref": "v1"}]
         self.assertEqual(
-            crp.merge_pack_selections(tracked, [], []),
+            crp.resolve_selections(tracked, [], []),
             [{"name": "a", "ref": "v1"}],
         )
 
@@ -238,20 +287,20 @@ class MergeSelectionsTests(unittest.TestCase):
         tracked = [{"name": "a", "ref": "v1"}]
         local = [{"name": "a", "ref": "v2"}]
         self.assertEqual(
-            crp.merge_pack_selections(tracked, local, []),
+            crp.resolve_selections(tracked, local, []),
             [{"name": "a", "ref": "v2"}],
         )
 
     def test_env_adds_new_pack(self) -> None:
         tracked = [{"name": "a"}]
         env = [{"name": "b"}]
-        names = [e["name"] for e in crp.merge_pack_selections(tracked, [], env)]
+        names = [e["name"] for e in crp.resolve_selections(tracked, [], env)]
         self.assertEqual(sorted(names), ["a", "b"])
 
     def test_env_does_not_override_existing_ref(self) -> None:
         tracked = [{"name": "a", "ref": "v1"}]
         env = [{"name": "a"}]
-        merged = crp.merge_pack_selections(tracked, [], env)
+        merged = crp.resolve_selections(tracked, [], env)
         self.assertEqual(merged, [{"name": "a", "ref": "v1"}])
 
     def test_duplicate_in_tracked_warns(self) -> None:
@@ -260,7 +309,7 @@ class MergeSelectionsTests(unittest.TestCase):
             {"name": "a", "ref": "v2"},
         ]
         with mock.patch.object(sys, "stderr", io.StringIO()) as err:
-            merged = crp.merge_pack_selections(tracked, [], [])
+            merged = crp.resolve_selections(tracked, [], [])
             self.assertIn("duplicate pack 'a'", err.getvalue())
         self.assertEqual(merged, [{"name": "a", "ref": "v2"}])
 
@@ -631,14 +680,60 @@ class DoComposeTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def test_empty_opt_in_writes_upstream_byte_identical(self) -> None:
-        # No agent-config.yaml, no env var → empty selections → upstream copied.
+    def test_no_config_applies_default_agent_style(self) -> None:
+        """With no user signal, the internal default rule pack [agent-style] is applied."""
+        pack_content = "# default agent-style rules\n"
+        url = "https://example.com/v0.3.2/docs/rule-pack.md"
+        with mock.patch(
+            "urllib.request.urlopen",
+            _fake_urlopen({url: pack_content.encode("utf-8")}),
+        ):
+            rc = crp.do_compose(self.root, self.manifest_path, no_cache=False)
+        self.assertEqual(rc, 0)
+        out = (self.root / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("aa upstream content", out)
+        self.assertIn("# default agent-style rules", out)
+        self.assertIn("rule-pack:agent-style:begin", out)
+
+    def test_explicit_opt_out_empty_list_produces_upstream_byte_identical(self) -> None:
+        """`rule_packs: []` disables all packs; AGENTS.md matches upstream exactly."""
+        (self.root / "agent-config.yaml").write_text(
+            "rule_packs: []\n", encoding="utf-8"
+        )
         rc = crp.do_compose(self.root, self.manifest_path, no_cache=False)
         self.assertEqual(rc, 0)
         self.assertEqual(
             (self.root / "AGENTS.md").read_bytes(),
             b"aa upstream content\n",
         )
+
+    def test_explicit_opt_out_null_value_produces_upstream_byte_identical(self) -> None:
+        """`rule_packs:` with null value disables all packs."""
+        (self.root / "agent-config.yaml").write_text(
+            "rule_packs:\n", encoding="utf-8"
+        )
+        rc = crp.do_compose(self.root, self.manifest_path, no_cache=False)
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            (self.root / "AGENTS.md").read_bytes(),
+            b"aa upstream content\n",
+        )
+
+    def test_file_without_rule_packs_key_applies_default(self) -> None:
+        """agent-config.yaml present but without rule_packs key = no signal → default applies."""
+        (self.root / "agent-config.yaml").write_text(
+            "some_other_key: value\n", encoding="utf-8"
+        )
+        pack_content = "# default rules\n"
+        url = "https://example.com/v0.3.2/docs/rule-pack.md"
+        with mock.patch(
+            "urllib.request.urlopen",
+            _fake_urlopen({url: pack_content.encode("utf-8")}),
+        ):
+            rc = crp.do_compose(self.root, self.manifest_path, no_cache=False)
+        self.assertEqual(rc, 0)
+        out = (self.root / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("# default rules", out)
 
     def test_tracked_yaml_opt_in(self) -> None:
         (self.root / "agent-config.yaml").write_text(
@@ -916,6 +1011,146 @@ class BashCliTests(unittest.TestCase):
         env["AGENT_CONFIG_RULE_PACKS"] = "foo"
         result = self._run("--rule-packs=agent-style", env=env)
         self.assertEqual(result.returncode, 0)
+        self.assertIn("- name: agent-style", result.stdout)
+        self.assertIn("AGENT_CONFIG_RULE_PACKS env var is ignored", result.stderr)
+
+
+# ---------- bootstrap.ps1 Python-probe regression (R6 H1) ----------
+
+
+class PowerShellPythonProbeTests(unittest.TestCase):
+    """Regression (R6 H1): the Python one-liner embedded in bootstrap.ps1's
+    Test-PythonRuns function must be valid Python syntax and exit 0 on a
+    working Python 3 interpreter. This guards against using PowerShell
+    operators (like `-ge`) inside the Python expression, which would make
+    every valid Python fail the probe and silently disable default-on
+    rule-pack composition on Windows."""
+
+    BOOTSTRAP_PS1 = ROOT / "bootstrap" / "bootstrap.ps1"
+
+    def test_python_probe_is_valid_python_and_exits_zero(self) -> None:
+        import re
+
+        text = self.BOOTSTRAP_PS1.read_text(encoding="utf-8")
+        # Find the probe command: & $PythonPath -c "import sys; ... SystemExit(...)"
+        match = re.search(
+            r'-c\s+"([^"]*import sys[^"]*SystemExit[^"]*)"', text
+        )
+        self.assertIsNotNone(
+            match, "bootstrap.ps1 must contain a Test-PythonRuns probe command"
+        )
+        expr = match.group(1)
+        result = subprocess.run(
+            [sys.executable, "-c", expr],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"PS1 python-probe expression {expr!r} must exit 0 on Python 3; "
+            f"stderr={result.stderr!r}",
+        )
+
+
+# ---------- bootstrap.ps1 CLI contract ----------
+
+
+class PowerShellCliTests(unittest.TestCase):
+    """CLI-contract regressions for bootstrap/bootstrap.ps1.
+
+    Mirrors BashCliTests. Exercises param parsing and dry-helper paths
+    only; no full bootstrap flow (no web request, no git clone). Each
+    subprocess call uses a fresh tmp cwd. Selection probes pwsh and
+    powershell via --help and picks one that actually runs the script.
+    """
+
+    BOOTSTRAP_PS1 = ROOT / "bootstrap" / "bootstrap.ps1"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        candidates: list[str] = []
+        if os.name == "nt":
+            candidates.extend(
+                [
+                    r"C:\Program Files\PowerShell\7\pwsh.exe",
+                    r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                ]
+            )
+        for cmd in ("pwsh", "powershell"):
+            found = shutil.which(cmd)
+            if found:
+                candidates.append(found)
+        seen: set[str] = set()
+        for shell in candidates:
+            if shell in seen or not Path(shell).exists():
+                continue
+            seen.add(shell)
+            probe = subprocess.run(
+                [
+                    shell,
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(cls.BOOTSTRAP_PS1),
+                    "-Help",
+                ],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+            )
+            if probe.returncode == 0 and "Usage:" in probe.stdout:
+                cls.shell = shell
+                return
+        raise unittest.SkipTest("usable PowerShell not available")
+
+    def _run(self, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            return subprocess.run(
+                [
+                    self.shell,
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(self.BOOTSTRAP_PS1),
+                    *args,
+                ],
+                cwd=tmp,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+    def test_help_prints_usage(self) -> None:
+        result = self._run("-Help")
+        self.assertEqual(result.returncode, 0, f"stderr={result.stderr!r}")
+        self.assertIn("Usage:", result.stdout)
+
+    def test_rule_packs_empty_rejected(self) -> None:
+        """Regression mirror of BashCliTests R2 M1: -RulePacks '' must error before bootstrap runs."""
+        result = self._run("-RulePacks", "")
+        self.assertEqual(result.returncode, 1, f"stderr={result.stderr!r}")
+        self.assertIn("-RulePacks requires a pack name", result.stderr)
+
+    def test_rule_packs_prints_yaml_snippet(self) -> None:
+        result = self._run("-RulePacks", "agent-style")
+        self.assertEqual(result.returncode, 0, f"stderr={result.stderr!r}")
+        self.assertIn("rule_packs:", result.stdout)
+        self.assertIn("- name: agent-style", result.stdout)
+
+    def test_unknown_param_rejected(self) -> None:
+        """PowerShell natively rejects unknown named parameters."""
+        result = self._run("-NoSuchParam")
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_flag_over_env_var_precedence(self) -> None:
+        """`-RulePacks` wins over `AGENT_CONFIG_RULE_PACKS`; env-var ignored in dry-helper mode, notice emitted."""
+        env = dict(os.environ)
+        env["AGENT_CONFIG_RULE_PACKS"] = "foo"
+        result = self._run("-RulePacks", "agent-style", env=env)
+        self.assertEqual(result.returncode, 0, f"stderr={result.stderr!r}")
         self.assertIn("- name: agent-style", result.stdout)
         self.assertIn("AGENT_CONFIG_RULE_PACKS env var is ignored", result.stderr)
 

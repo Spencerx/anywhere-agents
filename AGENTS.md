@@ -36,7 +36,7 @@ curl -sfL https://raw.githubusercontent.com/yzhao062/anywhere-agents/main/bootst
 bash .agent-config/bootstrap.sh
 ```
 
-This bootstrap flow refreshes the consuming repo's root `AGENTS.md` to match the shared copy. If a project later needs repo-local overrides, put them in `AGENTS.local.md`.
+This bootstrap flow refreshes the consuming repo's root `AGENTS.md` on every run: by default it composes the shared upstream copy with the `agent-style` rule pack (requires Python 3 + PyYAML; bootstrap attempts a best-effort `pip install --user pyyaml` when missing). When rule-pack composition is disabled (`rule_packs: []` in `agent-config.yaml`) or unavailable (Python or PyYAML absent after the auto-install attempt), the root `AGENTS.md` is written verbatim from the shared upstream copy. If a project later needs repo-local overrides, put them in `AGENTS.local.md`.
 
 Read and follow the rules in `.agent-config/AGENTS.md` as baseline defaults. Any rule in `AGENTS.local.md` overrides the shared default.
 When a skill is invoked, read its SKILL.md from `.agent-config/repo/skills/<skill-name>/SKILL.md`.

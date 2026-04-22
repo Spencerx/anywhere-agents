@@ -164,6 +164,10 @@ class RepoValidationTests(unittest.TestCase):
         (project_dir / "AGENTS.md").write_text("stale-root-agents\n", encoding="utf-8")
         (project_dir / "AGENTS.local.md").write_text("## Local Rules\n- keep me\n", encoding="utf-8")
         (project_dir / ".gitignore").write_text("node_modules/\n/.agent-config/\n", encoding="utf-8")
+        # Opt out of default-on rule-pack composition so this smoke test's
+        # byte-identical upstream-AGENTS assertion still holds. Rule-pack
+        # composition has dedicated tests in test_compose_rule_packs.
+        (project_dir / "agent-config.yaml").write_text("rule_packs: []\n", encoding="utf-8")
         return project_dir
 
     def verify_bootstrap_result(self, project_dir: Path) -> None:
@@ -294,7 +298,7 @@ class RepoValidationTests(unittest.TestCase):
             "```bash",
             "curl -sfL https://raw.githubusercontent.com/yzhao062/anywhere-agents/main/bootstrap/bootstrap.sh -o .agent-config/bootstrap.sh",
             "bash .agent-config/bootstrap.sh",
-            "root `AGENTS.md` to match the shared copy",
+            "refreshes the consuming repo's root `AGENTS.md`",
             "AGENTS.local.md",
             ".claude/settings.json",
             "effortLevel",

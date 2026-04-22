@@ -79,6 +79,7 @@ plugins:
 nav:
   - Home: index.md
   - Install: install.md
+  - Rule packs: rule-pack-composition.md
   - Skills:
     - Overview: skills/index.md
     - implement-review:
