@@ -14,8 +14,8 @@ flowchart TD
     H -->|yes| I[Dispatch to<br/>matching skill]
     H -->|no| J[Fall through to<br/>superpowers or general]
 
-    classDef match fill:#fff,stroke:#990000,stroke-width:1.5px,color:#990000;
-    classDef skill fill:#990000,stroke:#7a0000,color:#fff;
+    classDef match fill:#fff,stroke:#8b2635,stroke-width:1.5px,color:#8b2635;
+    classDef skill fill:#8b2635,stroke:#701528,color:#fff;
     classDef fall fill:#f5f5f5,stroke:#999,color:#555;
     class A,B,D,H match;
     class C,E,F,G,I skill;

@@ -9,7 +9,12 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
-_No unreleased changes queued._
+### Changed
+
+- **Docs overhaul: README, README.zh-CN, and docs/index.md aligned to v0.4.0 pack-architecture positioning.** Replaces the v0.3-era scenario-first narrative with a 4-paragraph Why section (multi-agent, many-repos, review loop, writing rules), a 4-paragraph How It Works that explicitly carries the v0.4.0 vs v0.4.x boundary (CLI writes user-level `packs:` today; bootstrap consumes user-level + project-level `packs:` in v0.4.x; legacy project-level `rule_packs:` remains the only bootstrap-active project key in v0.4.0), a new "What This Looks Like" section with five examples in five different visual formats (session-banner screenshot, post-bootstrap repo tree, dual-agent generation Mermaid, Without/With writing-style HTML table, guard-deny terminal mock), a Pack Management CLI section with embedded `docs/pack-cli-demo.gif`, and a What's Next paragraph. zh-CN README mirrors the same structure with warm conversational tone (你, not 您) and English technical terms preserved (`pack`, `composer`, `bootstrap`, `skill`, `hook`, `guard`). Title Case applied globally to README + docs/index.md headings per RULE-G.
+- **Visual identity: USC cardinal `#990000` → warm burgundy `#8b2635`.** Hero PNG (`docs/hero.html` + re-rendered `docs/hero.png`), session-banner PNG (`docs/banner.html` + re-rendered `docs/session-banner.png`), README badge colors, Mermaid theme variables in README and three docs Mermaid blocks, and `docs/stylesheets/extra.css` for the Material light + slate schemes. Slate-mode body link contrast tuned to `#d36b77` / `#e4939b` for WCAG AA pass (4.71:1 / 6.86:1). New `docs/_render_hero.py` and `docs/_render_banner.py` helpers keep both PNGs reproducible.
+- **CLI demo: `docs/pack-cli-demo.gif` (vhs).** New 18.8s GIF demonstrating `pack list` → `pack add aa-core-skills --ref v0.4.0` → `pack list` → `pack remove aa-core-skills` → `pack list`, rendered via the official `ghcr.io/charmbracelet/vhs` image pinned by digest. Tape (`docs/pack-cli-demo.tape`) + render helper (`docs/_render_gif.sh`) + demo wrapper scripts (`docs/_demo-helpers/`) committed for reproducibility.
+- **README cleanup.** Dropped the Day-to-Day Usage collapsible (3 of 4 rows duplicated the Install section). Removed the duplicate "Claude Code + Codex primary support" bullet from Limitations and Caveats (already in What This Is Not). Updated Repo Layout to cover the v0.4.0 pack architecture (`bootstrap/packs.yaml`, `scripts/compose_packs.py`, `scripts/packs/`). Updated What This Is Not to reflect the v0.4.0 CLI + YAML manifest reality.
 
 ## [0.4.0] — 2026-04-23
 

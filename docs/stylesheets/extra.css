@@ -1,17 +1,17 @@
-/* USC cardinal palette for anywhere-agents on Read the Docs */
+/* Warm burgundy palette for anywhere-agents on Read the Docs */
 
 :root {
-  --md-primary-fg-color:        #990000;
-  --md-primary-fg-color--light: #b31b1b;
-  --md-primary-fg-color--dark:  #7a0000;
-  --md-accent-fg-color:         #990000;
+  --md-primary-fg-color:        #8b2635;
+  --md-primary-fg-color--light: #a83a4a;
+  --md-primary-fg-color--dark:  #701528;
+  --md-accent-fg-color:         #8b2635;
 }
 
 [data-md-color-scheme="slate"] {
-  --md-primary-fg-color:        #c41e3a;
-  --md-primary-fg-color--light: #d94b63;
-  --md-primary-fg-color--dark:  #8b1728;
-  --md-accent-fg-color:         #e53e3e;
+  --md-primary-fg-color:        #a83a4a;
+  --md-primary-fg-color--light: #c75b68;
+  --md-primary-fg-color--dark:  #701528;
+  --md-accent-fg-color:         #c75b68;
 }
 
 .md-typeset a {
@@ -20,6 +20,20 @@
 
 .md-typeset a:hover {
   color: var(--md-primary-fg-color--light);
+}
+
+/* Slate (dark) scheme link contrast: Material's slate background is
+   approximately #1e2129. The default --md-primary-fg-color of #a83a4a
+   gives ~2.58:1 against that, below WCAG AA 4.5:1 for normal text.
+   These overrides shift body links to lighter burgundy variants
+   (~4.71:1 and ~6.86:1) without affecting the header / nav surfaces
+   which keep the deeper burgundy for brand consistency. */
+[data-md-color-scheme="slate"] .md-typeset a {
+  color: #d36b77;
+}
+
+[data-md-color-scheme="slate"] .md-typeset a:hover {
+  color: #e4939b;
 }
 
 /* Header bar uses the primary color in Material; these keep the rest

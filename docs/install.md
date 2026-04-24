@@ -14,7 +14,7 @@ flowchart LR
     H --> I[Add .agent-config/<br/>to .gitignore]
     I --> J[Done — agent<br/>reads AGENTS.md]
 
-    classDef step fill:#fff,stroke:#990000,stroke-width:1.5px,color:#990000;
+    classDef step fill:#fff,stroke:#8b2635,stroke-width:1.5px,color:#8b2635;
     class A,B,C,D,E,F,G,H,I,J step;
 ```
 
