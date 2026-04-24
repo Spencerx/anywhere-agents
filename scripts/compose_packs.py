@@ -1,47 +1,66 @@
 #!/usr/bin/env python3
 """Unified pack composer for anywhere-agents (v0.4.0+).
 
-Entry point invoked by bootstrap.sh / bootstrap.ps1 once Phase 1e wires it in.
-Accepts the same CLI surface as ``scripts/compose_rule_packs.py`` (``--root``,
-``--manifest``, ``--no-cache``, ``--print-yaml``) so the bootstrap scripts can
-point at it without plumbing changes.
+Entry point invoked by bootstrap.sh / bootstrap.ps1. Handles both v1
+(legacy passive-only) and v2 (unified passive + active) manifests:
 
-Phase 1 behavior (this file):
+- v1 manifests: delegate to ``scripts/compose_rule_packs.py`` so v0.3.x
+  consumer-visible output stays byte-identical during the BC window.
+- v2 manifests: parse with ``scripts.packs.schema``, resolve selections,
+  route passive entries through the v2 passive adapter, dispatch active
+  entries via the kind-handler registry, and stage all writes through
+  ``scripts.packs.transaction`` for per-file atomic commits. State files
+  (``pack-lock.json``, ``pack-state.json``) are written at end on success.
 
-1. Resolve the manifest path (preferring ``packs.yaml`` over legacy
-   ``rule-packs.yaml`` alias, per Phase 1a).
-2. Parse with ``scripts.packs.schema`` to validate structure + reject
-   v0.4.0-out-of-scope features (private source URLs, ``update_policy: auto``
-   on active entries, unknown kinds).
-3. If any pack declares ``active:`` entries, refuse with a clear
-   "v0.4.0 Phase 3" error. Phase 3 replaces this branch with real dispatch.
-4. Otherwise, delegate the passive composition to the v0.3.x composer in
-   ``scripts/compose_rule_packs.py`` so consumer-visible output stays
-   byte-identical during the BC window.
-
-No network or filesystem side effects beyond what the delegated composer
-performs. All schema errors are raised at parse time, before fetch.
+The v2 composition flow does not yet acquire per-user / per-repo locks
+(Phase 4 wires them in) and does not yet invoke startup reconciliation
+(also Phase 4). Phase 3's contract is "active-kind dispatch works + 4
+shipped skills convert to pack-emitted"; the lifecycle-robustness
+additions layer on in Phase 4+.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import tempfile
 from pathlib import Path
+from typing import Any, Callable
 
-# Sibling imports: scripts/ is on sys.path when this file is invoked as a
-# script; compose_rule_packs.py lives next to us, and the packs/ package
-# is a child directory.
 import compose_rule_packs as legacy  # noqa: E402
+from packs import dispatch  # noqa: E402
+from packs import handlers  # noqa: E402 — side-effect: registers handlers
+from packs import passive as passive_mod  # noqa: E402
 from packs import schema  # noqa: E402
+from packs import state as state_mod  # noqa: E402
+from packs import transaction as txn_mod  # noqa: E402
+
+
+def _validated_state_bytes(
+    write_fn: Callable[[Path, dict[str, Any]], None], payload: dict[str, Any]
+) -> bytes:
+    """Run the state-file ``write_fn`` against a temp path so schema
+    validation errors surface before we stage the content. Returns the
+    bytes written — caller stages them through the composer transaction
+    so all writes (outputs + state files) share one commit boundary.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td) / "state.json"
+        write_fn(tmp, payload)
+        return tmp.read_bytes()
+
+
+# Default v2 selections applied when the consumer provides no signal.
+# Includes the v0.3.x-default agent-style rule pack plus the bundled
+# aa-core-skills pack so shipped-skill pointers are emitted under the
+# same default-on behavior as v0.3.x.
+DEFAULT_V2_SELECTIONS: list[dict[str, str]] = [
+    {"name": "agent-style"},
+    {"name": "aa-core-skills"},
+]
 
 
 def _resolve_manifest_path(root: Path, explicit: Path | None) -> Path:
-    """Mirror the legacy composer's default-path logic for consistency.
-
-    Callers that pass an explicit ``--manifest`` get that path verbatim.
-    Otherwise we look in the bootstrap-sparse-clone location for
-    ``packs.yaml`` first, then fall back to the v0.3.x ``rule-packs.yaml``.
-    """
     if explicit is not None:
         return explicit
     bootstrap_dir = root / ".agent-config" / "repo" / "bootstrap"
@@ -55,83 +74,225 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="unified pack composer for anywhere-agents (v0.4.0+)"
     )
-    parser.add_argument(
-        "--root",
-        type=Path,
-        default=Path("."),
-        help="consumer repo root (default: cwd)",
-    )
-    parser.add_argument(
-        "--manifest",
-        type=Path,
-        default=None,
-        help=(
-            "path to packs.yaml manifest (legacy rule-packs.yaml also accepted; "
-            "default: <root>/.agent-config/repo/bootstrap/packs.yaml, falling back "
-            "to rule-packs.yaml if packs.yaml is absent)"
-        ),
-    )
-    parser.add_argument(
-        "--no-cache",
-        action="store_true",
-        help="force refetch of rule-pack content, ignoring cache",
-    )
-    parser.add_argument(
-        "--print-yaml",
-        metavar="PACK",
-        default=None,
-        help="dry helper: print agent-config.yaml snippet for PACK and exit",
-    )
+    parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument("--manifest", type=Path, default=None)
+    parser.add_argument("--no-cache", action="store_true")
+    parser.add_argument("--print-yaml", metavar="PACK", default=None)
     args = parser.parse_args(argv)
 
-    # --print-yaml is a pure helper; defer to legacy composer unchanged.
     if args.print_yaml:
         return legacy.main(argv)
 
     root = args.root.resolve()
     manifest_path = _resolve_manifest_path(root, args.manifest)
 
-    # Parse with the new schema when a manifest is present, so v0.4.0-
-    # out-of-scope features (private source URLs, update_policy: auto on
-    # active, unknown kinds, missing required fields) are rejected at parse
-    # time with a clear message, and active-slot / v2 entries get the
-    # Phase-3 "not yet" error instead of a confusing downstream failure.
-    if manifest_path.exists():
+    if not manifest_path.exists():
+        # Nothing to compose; legacy.main emits the appropriate error.
+        return legacy.main(argv)
+
+    try:
+        parsed = schema.parse_manifest(manifest_path)
+    except schema.ParseError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
+
+    if parsed["version"] == 1:
+        # Legacy passive-only manifest: delegate.
+        return legacy.main(argv)
+
+    # v2 manifest: full composition here.
+    return _do_compose_v2(root, parsed, args.no_cache)
+
+
+def _do_compose_v2(
+    root: Path, parsed: dict, no_cache: bool
+) -> int:
+    # ----- resolve selections (reuse legacy's config parsing) -----
+    try:
+        tracked = legacy.parse_user_config(root / "agent-config.yaml")
+        local = legacy.parse_user_config(root / "agent-config.local.yaml")
+    except legacy.RulePackError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
+
+    env_val = os.environ.get("AGENT_CONFIG_RULE_PACKS", "") or os.environ.get(
+        "AGENT_CONFIG_PACKS", ""
+    )
+    env_list = legacy.parse_env_packs(env_val) if env_val else []
+
+    try:
+        selections = legacy.resolve_selections(
+            tracked, local, env_list, default=DEFAULT_V2_SELECTIONS
+        )
+    except legacy.RulePackError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
+
+    # ----- upstream AGENTS.md -----
+    upstream_path = root / ".agent-config" / "AGENTS.md"
+    if not upstream_path.exists():
+        sys.stderr.write(
+            f"error: upstream AGENTS.md not found at {upstream_path}; "
+            "bootstrap should fetch it before invoking this helper\n"
+        )
+        return 1
+    upstream = upstream_path.read_text(encoding="utf-8")
+
+    # Opt-out: selections empty → write verbatim upstream and exit.
+    if not selections:
         try:
-            parsed = schema.parse_manifest(manifest_path)
-        except schema.ParseError as exc:
-            sys.stderr.write(f"error: {exc}\n")
-            return 1
-
-        for pack in parsed["packs"]:
-            if pack.get("active"):
-                sys.stderr.write(
-                    f"error: pack {pack['name']!r} declares 'active:' "
-                    "entries; active-kind dispatch lands in v0.4.0 Phase 3. "
-                    "Use a passive-only manifest in this build.\n"
-                )
-                return 2
-
-        # v0.4.0 Phase 1 accepts version-2 manifests at the schema layer
-        # (so pack authors can validate future-shape manifests early) but
-        # composition through the v0.3.x passive composer requires version-1
-        # input. Reject v2 explicitly here so callers see a Phase-1-specific
-        # message instead of the legacy composer's "version unsupported"
-        # error bubbling up from a deeper layer. Phase 3 replaces this
-        # branch with the unified passive + active composer.
-        if parsed["version"] == 2:
+            legacy.atomic_write(root / "AGENTS.md", upstream)
+        except OSError as exc:
             sys.stderr.write(
-                "error: passive-only version-2 manifests are accepted by "
-                "the schema but are not yet composed by this Phase 1 build. "
-                "Keep the manifest on version 1 for now, or wait for the "
-                "Phase 3 unified composer to land.\n"
+                f"error: failed to write verbatim AGENTS.md: {exc}\n"
             )
-            return 2
+            return 1
+        return 0
 
-    # Passive-only version-1 (or no manifest at all): hand off to the v0.3.x
-    # composer, which performs the actual fetch + AGENTS.md composition.
-    # Keeps v0.3.x consumer-visible output byte-identical during the BC window.
-    return legacy.main(argv)
+    # ----- state setup -----
+    project_lock_path = root / ".agent-config" / "pack-lock.json"
+    project_state_path = root / ".agent-config" / "pack-state.json"
+    user_state_path = Path.home() / ".claude" / "pack-state.json"
+
+    pack_lock = state_mod.empty_pack_lock()
+    project_state = state_mod.empty_project_state()
+    try:
+        user_state = state_mod.load_user_state(user_state_path)
+    except state_mod.StateError as exc:
+        sys.stderr.write(
+            f"warning: user state at {user_state_path} unreadable "
+            f"({exc}); starting fresh\n"
+        )
+        user_state = state_mod.empty_user_state()
+
+    # ----- compose -----
+    composed_agents = upstream
+    cache_dir = root / ".agent-config" / "rule-packs"
+
+    packs_by_name = {p["name"]: p for p in parsed["packs"]}
+    # Staging dir name matches Phase 2's reconciliation scan pattern
+    # `*.staging-*` so a crashed composer is recoverable on next startup
+    # once Phase 4 wires reconciliation into bootstrap.
+    staging_dir = root / ".agent-config" / f"pack-compose.staging-{os.getpid()}"
+    lock_path = root / ".agent-config" / ".pack-lock.lock"
+
+    try:
+        with txn_mod.Transaction(staging_dir, lock_path) as txn:
+            for selection in selections:
+                pack_name = selection["name"]
+                pack = packs_by_name.get(pack_name)
+                if pack is None:
+                    sys.stderr.write(
+                        f"error: pack {pack_name!r} not found in manifest\n"
+                    )
+                    return 1
+
+                ctx = _build_ctx(
+                    root=root,
+                    pack=pack,
+                    selection=selection,
+                    txn=txn,
+                    pack_lock=pack_lock,
+                    project_state=project_state,
+                    user_state=user_state,
+                )
+
+                # Passive entries first (concatenate into AGENTS.md).
+                for passive_entry in pack.get("passive", []) or []:
+                    composed_agents = passive_mod.handle_passive_entry(
+                        passive_entry,
+                        pack,
+                        ctx,
+                        upstream_agents_md=composed_agents,
+                        cache_dir=cache_dir,
+                        no_cache=no_cache,
+                    )
+
+                # Then active entries (dispatch by kind).
+                for active_entry in pack.get("active", []) or []:
+                    dispatch.dispatch_active(active_entry, ctx)
+
+                ctx.finalize_pack_lock()
+
+            # Stage all writes — state files + AGENTS.md — through the
+            # same transaction so a state-validation error surfaces
+            # before any output commits and partial state cannot leak.
+            txn.stage_write(
+                project_lock_path,
+                _validated_state_bytes(state_mod.save_pack_lock, pack_lock),
+            )
+            txn.stage_write(
+                project_state_path,
+                _validated_state_bytes(state_mod.save_project_state, project_state),
+            )
+            if user_state.get("entries"):
+                txn.stage_write(
+                    user_state_path,
+                    _validated_state_bytes(state_mod.save_user_state, user_state),
+                )
+            txn.stage_write(
+                root / "AGENTS.md", composed_agents.encode("utf-8")
+            )
+    except (
+        state_mod.StateError,
+        dispatch.DispatchError,
+        legacy.RulePackError,
+        FileNotFoundError,
+        ValueError,
+    ) as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 1
+    except OSError as exc:
+        sys.stderr.write(f"error: composition failed: {exc}\n")
+        return 1
+
+    return 0
+
+
+def _build_ctx(
+    *,
+    root: Path,
+    pack: dict,
+    selection: dict,
+    txn: txn_mod.Transaction,
+    pack_lock: dict,
+    project_state: dict,
+    user_state: dict,
+) -> dispatch.DispatchContext:
+    """Assemble a DispatchContext for one pack's composition."""
+    source = pack.get("source")
+    if isinstance(source, dict):
+        source_url = source.get("repo") or source.get("url") or "bundled:aa"
+        pack_ref = selection.get("ref") or source.get("ref") or "bundled"
+    else:
+        # Source absent or string: treat as bundled.
+        source_url = source if isinstance(source, str) and source else "bundled:aa"
+        pack_ref = selection.get("ref") or pack.get("default-ref") or "bundled"
+
+    # Pack-level hosts default (pack-architecture.md:199) is explicitly
+    # threaded into the context so dispatch._effective_hosts() can
+    # inherit it when an active entry omits its own hosts:.
+    pack_hosts_default = pack.get("hosts")
+
+    return dispatch.DispatchContext(
+        pack_name=pack["name"],
+        pack_source_url=source_url,
+        pack_requested_ref=pack_ref,
+        # Phase 3 uses requested_ref as resolved_commit; true SHA
+        # resolution (git ls-remote) lands in Phase 4/5 for private
+        # sources.
+        pack_resolved_commit=pack_ref,
+        pack_update_policy=pack.get("update_policy", "locked"),
+        pack_source_dir=root / ".agent-config" / "repo",
+        project_root=root,
+        user_home=Path.home(),
+        repo_id=str(root),
+        txn=txn,
+        pack_lock=pack_lock,
+        project_state=project_state,
+        user_state=user_state,
+        pack_hosts=pack_hosts_default,
+    )
 
 
 if __name__ == "__main__":

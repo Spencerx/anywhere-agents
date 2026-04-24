@@ -522,6 +522,104 @@ def _validate_user_state_owner(
         )
 
 
+class UserLevelOutputConflict(StateError):
+    """Raised when a second repo claims the same logical user-level output
+    with different expected content than an existing owner.
+
+    Per pack-architecture.md § "Same-path / different-content conflict",
+    composition fails closed with this error; no file is overwritten, no
+    ``owners:`` merge is attempted, and the installing repo receives no
+    partial install for the conflicting entry. The error surfaces the
+    existing owners + refs so the user can see who already owns it.
+    """
+
+    def __init__(
+        self,
+        target_path: str,
+        existing_owners: list[dict[str, Any]],
+        requested_ref: str,
+        requested_content: Any,
+    ) -> None:
+        self.target_path = target_path
+        self.existing_owners = existing_owners
+        self.requested_ref = requested_ref
+        self.requested_content = requested_content
+        summary = ", ".join(
+            f"{o['pack']}@{o.get('requested_ref', '?')} from {o.get('repo_id', '?')}"
+            for o in existing_owners
+        )
+        super().__init__(
+            f"user-level-output-conflict at {target_path}: existing owners "
+            f"[{summary}] claim different expected content than the "
+            f"incoming request at ref {requested_ref!r}"
+        )
+
+
+def upsert_user_state_entry(
+    user_state: dict[str, Any],
+    *,
+    kind: str,
+    target_path: str,
+    expected_sha256_or_json: Any,
+    owner: dict[str, Any],
+) -> str:
+    """Merge ``owner`` into the user-level state entry at ``target_path``.
+
+    Behavior (mirrors pack-architecture.md:406-408 ownership contract):
+
+    - If no entry exists for ``(kind, target_path)``: create one with
+      ``owners = [owner]``. Returns ``"created"``.
+    - If an entry exists with matching ``expected_sha256_or_json``:
+      add ``owner`` to the owners list if not already present (matched
+      by ``repo_id`` + ``pack``); no change to on-disk content expected.
+      Returns ``"joined"`` on new owner added, ``"already-owned"`` on
+      duplicate.
+    - If an entry exists with different ``expected_sha256_or_json``:
+      raise ``UserLevelOutputConflict``. No mutation.
+
+    The caller is responsible for also updating pack-lock + staging the
+    on-disk content (hook file or settings.json merge); this function
+    only touches the in-memory user-state payload.
+    """
+    if kind not in VALID_USER_STATE_KINDS:
+        raise StateError(
+            f"upsert_user_state_entry: unknown kind {kind!r}; "
+            f"expected one of {sorted(VALID_USER_STATE_KINDS)}"
+        )
+    entries = user_state.setdefault("entries", [])
+    for entry in entries:
+        if entry.get("kind") != kind or entry.get("target_path") != target_path:
+            continue
+        # Found an existing entry at this (kind, path). Compare content.
+        existing_content = entry.get("expected_sha256_or_json")
+        if existing_content != expected_sha256_or_json:
+            raise UserLevelOutputConflict(
+                target_path=target_path,
+                existing_owners=entry.get("owners", []),
+                requested_ref=owner.get("requested_ref", "?"),
+                requested_content=expected_sha256_or_json,
+            )
+        # Matching content: join owners if not already present.
+        for existing_owner in entry["owners"]:
+            if (
+                existing_owner.get("repo_id") == owner.get("repo_id")
+                and existing_owner.get("pack") == owner.get("pack")
+            ):
+                return "already-owned"
+        entry["owners"].append(owner)
+        return "joined"
+    # No existing entry: create.
+    entries.append(
+        {
+            "kind": kind,
+            "target_path": target_path,
+            "expected_sha256_or_json": expected_sha256_or_json,
+            "owners": [owner],
+        }
+    )
+    return "created"
+
+
 def save_user_state(path: Path, data: dict[str, Any]) -> None:
     """Validate + atomically write user-level ``pack-state.json``.
 

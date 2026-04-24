@@ -861,12 +861,13 @@ class ShippedManifestTests(unittest.TestCase):
             "bootstrap/rule-packs.yaml should be renamed to packs.yaml in v0.4.0",
         )
 
-    def test_manifest_parses(self) -> None:
-        packs = crp.parse_manifest(self.MANIFEST)
-        self.assertIn("agent-style", packs)
-        entry = packs["agent-style"]
-        self.assertIn("{ref}", entry["source"])
-        self.assertTrue(entry["default-ref"].startswith("v"))
+    def test_manifest_parses_with_legacy_parser(self) -> None:
+        """The legacy parse_manifest only accepts version-1 manifests.
+        After the Phase 3 migration the shipped manifest is v2 and the
+        legacy parser rejects it with "version unsupported" — expected
+        behavior. V2 parsing is covered by tests/test_packs_schema.py."""
+        with self.assertRaisesRegex(crp.RulePackError, r"version"):
+            crp.parse_manifest(self.MANIFEST)
 
 
 # ---------- do_print_yaml ----------

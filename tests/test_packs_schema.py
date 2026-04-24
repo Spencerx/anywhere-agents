@@ -52,12 +52,15 @@ class LegacyV1Tests(_TmpDirCase):
         self.assertTrue(pack["_legacy"])
 
     def test_shipped_manifest_parses(self) -> None:
-        """The real bootstrap/packs.yaml we ship today must parse."""
+        """The real bootstrap/packs.yaml we ship today must parse. After
+        the Phase 3 v2 migration, it is a version-2 manifest with two
+        packs: agent-style (passive) and aa-core-skills (active)."""
         shipped = ROOT / "bootstrap" / "packs.yaml"
         parsed = schema.parse_manifest(shipped)
-        self.assertEqual(parsed["version"], 1)
+        self.assertEqual(parsed["version"], 2)
         names = [p["name"] for p in parsed["packs"]]
         self.assertIn("agent-style", names)
+        self.assertIn("aa-core-skills", names)
 
     def test_legacy_missing_source_rejects(self) -> None:
         path = _write_manifest(

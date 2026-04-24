@@ -1,17 +1,63 @@
-# Rule-pack manifest for anywhere-agents.
+# Pack manifest for anywhere-agents (v0.4.0 unified format).
 #
-# Each entry registers a rule pack that consumers can opt into via
-# agent-config.yaml at the consumer repo root. Adding a new pack is a PR:
-# add a manifest entry here, and the pack author must publish
-# docs/rule-pack.md at a stable git ref on their own repo.
+# Each entry registers a pack that consumers can opt into via
+# agent-config.yaml at the consumer repo root. See
+# docs/rule-pack-composition.md for the passive-slot contract and
+# pack-architecture.md § "The unified manifest" for the active-slot
+# contract (kind: skill / hook / permission / command).
 #
-# See docs/rule-pack-composition.md for the full contract.
-version: 1
+# Version 1 (legacy passive-only) is still accepted by the composer as a
+# BC alias; this file is version 2 because it mixes passive (agent-style)
+# and active (aa-core-skills) entries in one manifest.
+version: 2
 packs:
   - name: agent-style
     description: >
       Writing-rule pack. Banned-word list, formatting defaults,
       contraction rules, and dash usage guidance.
-    source: https://raw.githubusercontent.com/yzhao062/agent-style/{ref}/docs/rule-pack.md
-    default-ref: v0.3.2
+    source:
+      repo: https://github.com/yzhao062/agent-style
+      ref: v0.3.2
+    update_policy: locked
+    passive:
+      - files:
+          - from: docs/rule-pack.md
+            to: AGENTS.md
     maintainer: yzhao062
+
+  - name: aa-core-skills
+    description: >
+      Core skills bundled with anywhere-agents. Ships the four
+      shipped-skill directories (implement-review, my-router,
+      ci-mockup-figure, readme-polish) plus their .claude/commands/
+      pointer files. The pointer files remain in the aa source tree
+      during v0.4.0 (see pack-architecture.md § "Pack-emitted command
+      pointers") and are pack-emitted to consumer's .claude/commands/
+      alongside the skill directories.
+    update_policy: locked
+    hosts: [claude-code]
+    active:
+      - kind: skill
+        files:
+          - from: skills/implement-review/
+            to: .claude/skills/implement-review/
+          - from: .claude/commands/implement-review.md
+            to: .claude/commands/implement-review.md
+      - kind: skill
+        files:
+          - from: skills/my-router/
+            to: .claude/skills/my-router/
+          - from: .claude/commands/my-router.md
+            to: .claude/commands/my-router.md
+      - kind: skill
+        files:
+          - from: skills/ci-mockup-figure/
+            to: .claude/skills/ci-mockup-figure/
+          - from: .claude/commands/ci-mockup-figure.md
+            to: .claude/commands/ci-mockup-figure.md
+      - kind: skill
+        files:
+          - from: skills/readme-polish/
+            to: .claude/skills/readme-polish/
+          - from: .claude/commands/readme-polish.md
+            to: .claude/commands/readme-polish.md

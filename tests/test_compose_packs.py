@@ -85,11 +85,11 @@ class ManifestResolutionTests(unittest.TestCase):
         self.assertEqual(path, explicit)
 
 
-class V2CompositionRejectTests(unittest.TestCase):
-    """Passive-only version-2 manifests are accepted by the schema parser but
-    rejected for composition by the Phase 1 wrapper, so callers see a clear
-    Phase-1-specific error rather than the legacy composer's generic
-    'version unsupported' message bubbling up from a deeper layer."""
+class V2CompositionTests(unittest.TestCase):
+    """V2 manifests are dispatched through the unified composer in Phase 3.
+    The Phase-1 rejection branches (now obsolete) have been replaced by
+    real dispatch; these tests exercise the error paths that remain at
+    the wrapper layer."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -97,39 +97,6 @@ class V2CompositionRejectTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.bootstrap_dir = self.root / ".agent-config" / "repo" / "bootstrap"
         self.bootstrap_dir.mkdir(parents=True)
-
-    def test_passive_only_v2_rejected_at_phase_1(self) -> None:
-        _write(
-            self.bootstrap_dir / "packs.yaml",
-            "version: 2\n"
-            "packs:\n"
-            "  - name: agent-style\n"
-            "    source:\n"
-            "      repo: https://github.com/example/agent-style\n"
-            "      ref: v0.3.2\n"
-            "    passive:\n"
-            "      - files: [{from: docs/rule-pack.md, to: AGENTS.md}]\n",
-        )
-        rc, _out, err = _invoke(["--root", str(self.root)])
-        self.assertEqual(rc, 2)
-        self.assertIn("version-2", err)
-        self.assertIn("Phase 1 build", err)
-
-    def test_active_entry_rejected_with_phase_3_message(self) -> None:
-        _write(
-            self.bootstrap_dir / "packs.yaml",
-            "version: 2\n"
-            "packs:\n"
-            "  - name: implement-review\n"
-            "    active:\n"
-            "      - kind: skill\n"
-            "        hosts: [claude-code]\n"
-            "        files: [{from: skills/x/, to: .claude/skills/x/}]\n",
-        )
-        rc, _out, err = _invoke(["--root", str(self.root)])
-        self.assertEqual(rc, 2)
-        self.assertIn("active", err)
-        self.assertIn("Phase 3", err)
 
     def test_schema_error_surfaces_as_exit_1(self) -> None:
         _write(

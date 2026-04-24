@@ -222,6 +222,25 @@ class ScanOrphansTests(_TmpDirCase):
         results = reconciliation.scan_orphans([self.root])
         self.assertEqual(len(results), 1)
 
+    def test_scan_finds_composer_staging_dir_name(self) -> None:
+        """Regression for Round 1 Codex #3: the composer uses
+        ``pack-compose.staging-<pid>`` as its staging dir; reconciliation
+        must pick it up via the same ``.staging-`` pattern."""
+        target = self.root / "out.txt"
+        # Simulate a composer orphan: build a transaction under a dir
+        # named like the composer's staging dir.
+        staging = self.root / "pack-compose.staging-9999"
+        lock_path = self.root / "peer.lock"
+        lock_path.write_text("0\n", encoding="utf-8")
+        txn = txn_mod.Transaction(staging, lock_path)
+        txn.__enter__()
+        txn.stage_write(target, b"content")
+        # Leave the staging dir orphaned (no commit, no cleanup).
+
+        results = reconciliation.scan_orphans([self.root])
+        self.assertEqual(len(results), 1)
+        self.assertIn("pack-compose.staging-", str(results[0].staging_dir))
+
     def test_scan_skips_nonexistent_search_dir(self) -> None:
         results = reconciliation.scan_orphans([self.root / "nope"])
         self.assertEqual(results, [])
