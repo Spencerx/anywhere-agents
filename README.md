@@ -202,6 +202,17 @@ bash .agent-config/bootstrap.sh --rule-packs agent-style
 
 For the full contract (manifest schema, cache + offline semantics, failure modes, routing-marker validation, how to register a second pack), see [`docs/rule-pack-composition.md`](docs/rule-pack-composition.md).
 
+**Pack management CLI (v0.4.0+).** Install the `anywhere-agents` CLI via `pipx install anywhere-agents` (or `pip install`) to manage packs at the user level without editing per-project YAML:
+
+```bash
+anywhere-agents pack add https://github.com/you/your-pack --ref v1.0
+anywhere-agents pack list
+anywhere-agents pack remove your-pack
+anywhere-agents uninstall --all       # clean everything from the current project
+```
+
+The CLI writes to `$XDG_CONFIG_HOME/anywhere-agents/config.yaml` (POSIX) or `%APPDATA%\anywhere-agents\config.yaml` (Windows) so you can manage user-level pack selections without editing per-project YAML. In v0.4.0, bootstrap composition still resolves selections through the legacy project-tracked / project-local / env path; wiring the composer to the full four-layer resolver (user → project-tracked → project-local → `AGENT_CONFIG_PACKS` env var) is a v0.4.x follow-up.
+
 <details>
 <summary><b>Historical naming: why the scratch directory is <code>.agent-config/</code></b></summary>
 
