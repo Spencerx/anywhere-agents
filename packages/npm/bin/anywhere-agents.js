@@ -78,6 +78,17 @@ async function main(argv) {
     process.stdout.write(`anywhere-agents ${VERSION}\n`);
     return 0;
   }
+
+  // Subcommand dispatch: `pack` / `uninstall` need the Python-side
+  // implementation (user-level config ops + uninstall engine). If the
+  // user has pipx-installed anywhere-agents, delegate to it. Otherwise
+  // surface an actionable install hint so npm-only users see where to
+  // get the full CLI rather than a confusing "command not found".
+  const firstPositional = argv.find((a) => !a.startsWith("-"));
+  if (firstPositional === "pack" || firstPositional === "uninstall") {
+    return delegateToPython(argv);
+  }
+
   const dryRun = argv.includes("--dry-run");
 
   const { name, interpreter, psMode } = chooseScript();
@@ -128,6 +139,32 @@ async function main(argv) {
     log(`Bootstrap exited with code ${result.status}`);
   }
   return result.status ?? 0;
+}
+
+/**
+ * Delegate `pack` / `uninstall` subcommands to the pipx-installed Python
+ * entry point. Emits a friendly install hint when Python anywhere-agents
+ * is not available — npm users who only bootstrap (no pack mgmt) see no
+ * change; users who need pack mgmt get pointed at the right install.
+ */
+function delegateToPython(argv) {
+  // Try the installed `anywhere-agents` Python entry point first, then
+  // fall back to `python -m anywhere_agents.cli`.
+  const candidates = [
+    { cmd: "anywhere-agents", args: argv },
+    { cmd: "python3", args: ["-m", "anywhere_agents.cli", ...argv] },
+    { cmd: "python", args: ["-m", "anywhere_agents.cli", ...argv] },
+  ];
+  for (const { cmd, args } of candidates) {
+    const result = spawnSync(cmd, args, { stdio: "inherit", shell: false });
+    if (result.error && result.error.code === "ENOENT") {
+      continue;
+    }
+    return result.status ?? 0;
+  }
+  log(`'${argv[0]}' requires the Python-side anywhere-agents CLI.`);
+  log("Install with: pipx install anywhere-agents (recommended) or pip install anywhere-agents");
+  return 2;
 }
 
 main(process.argv.slice(2))
