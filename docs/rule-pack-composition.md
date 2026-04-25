@@ -96,6 +96,8 @@ A rule pack is a public GitHub repo that exposes:
 
 4. **Optional README cross-reference.** The pack's README should link to `docs/rule-pack.md` so readers know what anywhere-agents fetches.
 
+For a complete reference example that follows all four conventions, see [`yzhao062/agent-pack`](https://github.com/yzhao062/agent-pack). It declares three packs in the v2 manifest format (two passive rule packs and one active skill pack queued for v0.5.0), ships the matching content at the conventional paths, and documents the v0.4.0-vs-v0.5.0 loadability split honestly. Fork it as a starting point for your own pack repo.
+
 ## Composition flow
 
 On every anywhere-agents bootstrap with rule packs enabled, the composer:

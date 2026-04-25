@@ -77,6 +77,8 @@ anywhere-agents pack remove aa-core-skills
 
 **v0.4.0 boundary.** For pack selections that must affect `bootstrap` today, use the legacy `rule_packs:` key in `agent-config.yaml` or `agent-config.local.yaml`, or pass names through `AGENT_CONFIG_PACKS`. The `anywhere-agents pack` CLI writes user-level `packs:` config now; bootstrap starts reading that user-level file and the project-level `packs:` key in v0.4.x.
 
+**Authoring your own pack.** [`yzhao062/agent-pack`](https://github.com/yzhao062/agent-pack) is a public reference repo that declares three packs (two passive, one active) using the v2 manifest schema. Fork it as a starting point.
+
 ## What's Next
 
 `v0.4.0` ships the pack runtime (state files, cross-platform locks, recoverable transactions) and the pack CLI. `v0.4.x` wires the composer to acquire those locks and to reconcile installed packs against the manifest on every session start. `v0.5.0` adds private-source packs: fetch packs from private repos with the standard Git authentication you already have configured (SSH key, `gh auth login`, or `GITHUB_TOKEN`). Shipped-status details live in the [changelog](changelog.md).

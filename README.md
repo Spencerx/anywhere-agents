@@ -218,6 +218,8 @@ For the legacy rule-pack composition contract that still backs project-level `ru
 
 `v0.4.0` ships the pack runtime (state files, cross-platform locks, recoverable transactions) and the pack CLI. `v0.4.x` wires the composer to acquire those locks and to reconcile installed packs against the manifest on every session start. `v0.5.0` adds private-source packs: fetch packs from private repos with the standard Git authentication you already have configured (SSH key, `gh auth login`, or `GITHUB_TOKEN`). Shipped-status details live in the [changelog](CHANGELOG.md).
 
+Want to author your own pack? See [`yzhao062/agent-pack`](https://github.com/yzhao062/agent-pack), a public reference repo that declares three packs (two passive, one active) using the v2 manifest schema. Fork it, replace the content with your own profile and skills, tag a release, then follow its Consumer Setup split: copy passive bodies or register pack names in a controlled bootstrap manifest for v0.4.0; use `anywhere-agents pack add <url> --ref <tag>` once v0.5.0 remote fetch lands.
+
 ## Deeper Docs
 
 Full reference lives at **[anywhere-agents.readthedocs.io](https://anywhere-agents.readthedocs.io)**:
@@ -326,13 +328,18 @@ anywhere-agents/
 <details>
 <summary><b>Related Projects</b></summary>
 
-If you want a general-purpose multi-agent sync tool or a broader skill catalog, these take different approaches:
+**Same family.** `anywhere-agents` ships alongside two companion public repos:
+
+- [`agent-style`](https://github.com/yzhao062/agent-style): the writing-rule pack composed into every consumer's `AGENTS.md` by default. 21 rules (12 classic + 9 LLM-observed) with BAD -> GOOD examples per rule.
+- [`agent-pack`](https://github.com/yzhao062/agent-pack): public reference example for third-party pack authors. Declares 3 packs (passive profile, passive paper-workflow, active academic skills) in the v2 manifest format. Fork as a starting point for your own pack repo.
+
+**Different approaches.** If you want a general-purpose multi-agent sync tool or a broader skill catalog, these take different routes:
 
 - [iannuttall/dotagents](https://github.com/iannuttall/dotagents) — central location for hooks, commands, skills, AGENTS/CLAUDE.md files
 - [microsoft/agentrc](https://github.com/microsoft/agentrc) — repo-ready-for-AI tooling
 - [agentfiles on PyPI](https://pypi.org/project/agentfiles/) — CLI that syncs configurations across multiple agents
 
-`anywhere-agents` is intentionally narrower: a published, maintained, opinionated configuration — not a tool that manages configurations. Fork it if you like the setup; use one of the tools above if you want a universal manager.
+`anywhere-agents` is intentionally narrower: a published, maintained, opinionated configuration, not a tool that manages configurations. Fork it if you like the setup; use one of the tools above if you want a universal manager.
 
 </details>
 
