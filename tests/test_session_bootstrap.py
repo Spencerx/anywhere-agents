@@ -216,5 +216,64 @@ class SourceRepoTests(unittest.TestCase):
             shutil.rmtree(home, ignore_errors=True)
 
 
+class TestSessionBootstrapPendingNotice(unittest.TestCase):
+    """v0.5.0 Phase 8 Round 4 Issue 4: the banner notice prefix must use
+    ``anywhere-agents:`` (with colon and space) to match the existing
+    ``anywhere-agents: bootstrap refreshed`` line printed at line 275 of
+    session_bootstrap.py. The earlier ``[anywhere-agents]`` prefix was
+    inconsistent and should not appear anywhere in the output."""
+
+    def setUp(self):
+        self.tmp_project = tempfile.mkdtemp(prefix="sb-pending-proj-")
+        self.tmp_home = tempfile.mkdtemp(prefix="sb-pending-home-")
+        self.agent_dir = _make_consumer(Path(self.tmp_project))
+        _make_fresh_cache(Path(self.tmp_home) / ".claude" / "hooks")
+        self.env = {"HOME": self.tmp_home, "USERPROFILE": self.tmp_home}
+        # No-op bootstrap script so the subprocess succeeds without doing
+        # any real refresh work; we only care about stdout from the
+        # parent hook (the pending notice).
+        if platform.system() == "Windows":
+            (self.agent_dir / "bootstrap.ps1").write_text("# noop\n")
+        else:
+            (self.agent_dir / "bootstrap.sh").write_text("#!/bin/bash\n# noop\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_project, ignore_errors=True)
+        shutil.rmtree(self.tmp_home, ignore_errors=True)
+
+    def test_prints_compact_notice_when_pending_updates_present(self):
+        pending = self.agent_dir / "pending-updates.json"
+        pending.write_text(
+            json.dumps(
+                {
+                    "ts": "2026-04-26T00:00:00+00:00",
+                    "host": "claude-code",
+                    "packs": [
+                        {"name": "profile", "current": "a"*7, "available": "b"*7,
+                         "kind": "passive"},
+                    ],
+                }
+            )
+        )
+        rc, out, err = run_session_bootstrap(
+            self.tmp_project, env_overrides=self.env,
+        )
+        self.assertEqual(rc, 0, msg=err)
+        # Prefix must be the unified ``anywhere-agents: `` (colon + space)
+        # form. The bracketed ``[anywhere-agents]`` form is gone.
+        self.assertIn("anywhere-agents: 1 pack update pending", out)
+        self.assertIn("profile", out)
+        self.assertNotIn("[anywhere-agents]", out)
+
+    def test_silent_when_no_pending_file(self):
+        rc, out, err = run_session_bootstrap(
+            self.tmp_project, env_overrides=self.env,
+        )
+        self.assertEqual(rc, 0, msg=err)
+        # No pending notice when the file is absent.
+        self.assertNotIn("pack update", out)
+        self.assertNotIn("packs pending", out)
+
+
 if __name__ == "__main__":
     unittest.main()

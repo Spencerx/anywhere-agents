@@ -26,7 +26,7 @@ import os
 import sys
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 try:
     import yaml
@@ -296,6 +296,7 @@ def resolve_selections(
     env_add: list[str] | None = None,
     env_subtract: list[str] | None = None,
     default_selections: list[dict[str, Any]] | None = None,
+    validate_url_fn: Callable[..., None] | None = None,
 ) -> list[dict[str, Any]]:
     """Resolve pack selections across the four layers.
 
@@ -315,6 +316,16 @@ def resolve_selections(
     - ``default_selections`` apply only when no signal exists in any
       of the four layers (no config files, no env var, and no explicit
       empty-clear in any layer).
+
+    When ``validate_url_fn`` is provided, every entry's source URL
+    (across user-level, project-tracked, and project-local layers) is
+    passed through it as ``validate_url_fn(url, source_layer="<layer>")``
+    before any merge or network call. Pass
+    :func:`scripts.packs.auth.reject_credential_url` to enforce
+    parse-time credential-URL rejection across all layers (v0.5.0
+    Deferral 3 + Codex R1 M8). The env-var layer accepts pack names
+    only — its URL safety is enforced by :func:`parse_env_var` which
+    rejects anything that looks like a URL outright.
 
     Returns a list of pack dicts with ``name`` and any per-entry
     overrides (``ref``, ``skills-path``, etc.).
@@ -342,6 +353,26 @@ def resolve_selections(
             accumulated.clear()
             continue
         assert packs is not None  # explicit_empty False + non-None means list
+        # v0.5.0 R1 M8: validate every URL before the merge logic
+        # touches the entry. Per-layer dispatch ensures the error
+        # message identifies which config file (user-level /
+        # project-tracked / project-local) holds the offending URL.
+        if validate_url_fn is not None:
+            for entry in packs:
+                src = entry.get("source")
+                url: str | None = None
+                if isinstance(src, dict):
+                    # Match schema.py:180 precedence: ``repo`` is the
+                    # canonical key, ``url`` is the legacy alias. Reading
+                    # them in opposite orders across modules would let a
+                    # malformed pack with both keys present pass one
+                    # validation layer and fail another with a different
+                    # URL surfaced — confusing for users to debug.
+                    url = src.get("repo") or src.get("url")
+                elif isinstance(src, str):
+                    url = src
+                if url:
+                    validate_url_fn(url, source_layer=source)
         for entry in packs:
             accumulated[entry["name"]] = entry
 
@@ -370,9 +401,16 @@ def resolved_for_project(
     *,
     environ: dict[str, str] | None = None,
     default_selections: list[dict[str, Any]] | None = None,
+    validate_url_fn: Callable[..., None] | None = None,
 ) -> list[dict[str, Any]]:
     """Convenience: read all four layers for ``project_root`` + current
-    env and return the resolved selection list."""
+    env and return the resolved selection list.
+
+    ``validate_url_fn`` is forwarded to :func:`resolve_selections`. Pass
+    :func:`scripts.packs.auth.reject_credential_url` to enforce
+    parse-time credential-URL rejection at every layer (v0.5.0
+    Deferral 3 + Codex R1 M8).
+    """
     user_level_path = user_config_path(environ)
     user_level = (
         load_config_file(user_level_path) if user_level_path is not None else None
@@ -387,4 +425,5 @@ def resolved_for_project(
         env_add=env_add,
         env_subtract=env_subtract,
         default_selections=default_selections,
+        validate_url_fn=validate_url_fn,
     )

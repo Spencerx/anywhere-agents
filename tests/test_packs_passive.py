@@ -94,6 +94,12 @@ class HandlePassiveEntryTests(unittest.TestCase):
             pack_requested_ref="v0.3.2",
             pack_resolved_commit="v0.3.2",
             pack_update_policy="locked",
+            # v0.5.0 archive adapter keys on
+            # ``ctx.pack_source_dir / mapping['from']`` existing. The
+            # legacy bundled-pack contract leaves the rule-pack body
+            # outside ``.agent-config/repo/`` so this directory does not
+            # have to contain ``docs/rule-pack.md`` — the adapter falls
+            # through to ``_legacy.fetch_rule_pack``, mocked below.
             pack_source_dir=self.root / "pack_src",
             project_root=self.root / "project",
             user_home=self.root / "home",

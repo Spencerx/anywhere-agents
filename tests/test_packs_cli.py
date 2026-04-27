@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import io
 import os
+import pathlib
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 # Add both the PyPI package and the scripts dir to sys.path so the CLI
@@ -21,6 +23,45 @@ sys.path.insert(0, str(ROOT / "packages" / "pypi"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from anywhere_agents import cli  # noqa: E402
+
+
+@contextmanager
+def _mock_remote_pack(name: str = "cool", *, active: bool = False, extra_packs: list[dict] | None = None):
+    """Patch ``source_fetch.fetch_pack`` to return a minimal in-memory
+    archive with a synthesized ``pack.yaml`` containing ``name`` (plus
+    any ``extra_packs``). v0.4 tests used non-existent URLs that v0.5
+    would now hit the network for; this fixture gives them a deterministic
+    in-memory manifest so the original assertions still apply where they
+    still make sense."""
+    from anywhere_agents.packs import source_fetch
+    with tempfile.TemporaryDirectory() as d:
+        archive_dir = pathlib.Path(d)
+        body = "version: 2\npacks:\n"
+        body += f"  - name: {name}\n    description: x\n    source: {{repo: https://example/x, ref: main}}\n"
+        body += "    passive: [{files: [{from: a.md, to: b.md}]}]\n"
+        if active:
+            body += "    active: [{kind: skill, required: false, files: [{from: x/, to: y/}]}]\n"
+        for extra in extra_packs or []:
+            extra_active = "    active: [{kind: skill, required: false, files: [{from: x/, to: y/}]}]\n" if extra.get("active") else ""
+            body += (
+                f"  - name: {extra['name']}\n    description: x\n"
+                f"    source: {{repo: https://example/x, ref: main}}\n"
+                f"    passive: [{{files: [{{from: a.md, to: b.md}}]}}]\n"
+                f"{extra_active}"
+            )
+        (archive_dir / "pack.yaml").write_text(body)
+
+        archive = source_fetch.PackArchive(
+            url="https://example/x",
+            ref="main",
+            resolved_commit="ab" * 20,
+            method="anonymous",
+            archive_dir=archive_dir,
+            canonical_id=None,
+            cache_key="abcd1234/" + "ab" * 20,
+        )
+        with patch.object(source_fetch, "fetch_pack", return_value=archive) as patched:
+            yield patched
 
 
 def _invoke(argv: list[str], env: dict[str, str] | None = None) -> tuple[int, str, str]:
@@ -66,22 +107,25 @@ class _TmpHome(unittest.TestCase):
 
 
 class PackAddTests(_TmpHome):
-    def test_first_add_seeds_agent_style_default(self) -> None:
-        """First `pack add` on an empty user-level config auto-seeds
-        agent-style as the default + the user's added pack. This
-        prevents silent opt-out of the default rule pack."""
-        rc, _, err = _invoke(
-            ["pack", "add", "https://github.com/me/cool-pack", "--name", "cool"],
-            env=self.env,
-        )
+    """v0.5.0 ``pack add`` fetches the remote pack.yaml and expands one
+    user-level row per remote pack. Tests mock ``fetch_pack`` so they
+    don't reach the network. The pre-v0.5 behaviors of agent-style
+    seeding and same-name dedup were removed by Phase 9; the v0.5.0
+    semantic is "append every selected pack name to the list"."""
+
+    def test_first_add_writes_one_row_per_remote_pack(self) -> None:
+        with _mock_remote_pack("cool"):
+            rc, _, err = _invoke(
+                ["pack", "add", "https://github.com/me/cool-pack"],
+                env=self.env,
+            )
         self.assertEqual(rc, 0, msg=err)
         self.assertTrue(self.expected_config.exists())
 
         import yaml
         data = yaml.safe_load(self.expected_config.read_text(encoding="utf-8"))
         names = [p["name"] for p in data["packs"]]
-        self.assertIn("agent-style", names)
-        self.assertIn("cool", names)
+        self.assertEqual(names, ["cool"])
 
     def test_credential_url_rejected(self) -> None:
         rc, _, err = _invoke(
@@ -92,30 +136,17 @@ class PackAddTests(_TmpHome):
         self.assertIn("credentials", err)
 
     def test_second_add_appends(self) -> None:
-        _invoke(["pack", "add", "https://github.com/me/a"], env=self.env)
-        rc, _, _ = _invoke(
-            ["pack", "add", "https://github.com/me/b"], env=self.env
-        )
+        with _mock_remote_pack("a"):
+            _invoke(["pack", "add", "https://github.com/me/a"], env=self.env)
+        with _mock_remote_pack("b"):
+            rc, _, _ = _invoke(
+                ["pack", "add", "https://github.com/me/b"], env=self.env
+            )
         self.assertEqual(rc, 0)
         import yaml
         data = yaml.safe_load(self.expected_config.read_text(encoding="utf-8"))
         names = [p["name"] for p in data["packs"]]
-        self.assertEqual(sorted(names), ["a", "agent-style", "b"])
-
-    def test_add_updates_existing_same_name(self) -> None:
-        _invoke(
-            ["pack", "add", "https://github.com/me/foo", "--ref", "v1"],
-            env=self.env,
-        )
-        _invoke(
-            ["pack", "add", "https://github.com/me/foo", "--ref", "v2"],
-            env=self.env,
-        )
-        import yaml
-        data = yaml.safe_load(self.expected_config.read_text(encoding="utf-8"))
-        foo_entries = [p for p in data["packs"] if p.get("name") == "foo"]
-        self.assertEqual(len(foo_entries), 1)
-        self.assertEqual(foo_entries[0]["ref"], "v2")
+        self.assertEqual(sorted(names), ["a", "b"])
 
 
 class LegacyAliasMigrationTests(_TmpHome):
@@ -138,9 +169,10 @@ class LegacyAliasMigrationTests(_TmpHome):
 
     def test_add_migrates_legacy(self) -> None:
         self._prewrite_legacy()
-        rc, _, err = _invoke(
-            ["pack", "add", "https://github.com/me/new-pack"], env=self.env,
-        )
+        with _mock_remote_pack("new-pack"):
+            rc, _, err = _invoke(
+                ["pack", "add", "https://github.com/me/new-pack"], env=self.env,
+            )
         self.assertEqual(rc, 0, msg=err)
         import yaml
         data = yaml.safe_load(self.expected_config.read_text(encoding="utf-8"))
@@ -165,9 +197,10 @@ class LegacyAliasMigrationTests(_TmpHome):
 
 class PackRemoveTests(_TmpHome):
     def test_remove_existing(self) -> None:
-        _invoke(
-            ["pack", "add", "https://github.com/me/foo"], env=self.env,
-        )
+        with _mock_remote_pack("foo"):
+            _invoke(
+                ["pack", "add", "https://github.com/me/foo"], env=self.env,
+            )
         rc, _, err = _invoke(["pack", "remove", "foo"], env=self.env)
         self.assertEqual(rc, 0, msg=err)
         import yaml
@@ -187,13 +220,13 @@ class PackListTests(_TmpHome):
         self.assertIn("(not created yet)", out)
 
     def test_list_after_add(self) -> None:
-        _invoke(
-            ["pack", "add", "https://github.com/me/my-pack"], env=self.env
-        )
+        with _mock_remote_pack("my-pack"):
+            _invoke(
+                ["pack", "add", "https://github.com/me/my-pack"], env=self.env
+            )
         rc, out, _ = _invoke(["pack", "list"], env=self.env)
         self.assertEqual(rc, 0)
         self.assertIn("my-pack", out)
-        self.assertIn("agent-style", out)  # seeded on first add
 
 
 class BootstrapBackwardCompatTests(unittest.TestCase):

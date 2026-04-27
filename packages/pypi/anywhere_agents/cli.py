@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     # ``anywhere-agents`` on the existing bootstrap path.
     first_pos = next((a for a in raw if not a.startswith("-")), None)
     if first_pos == "pack":
-        return _pack_main(raw[raw.index("pack") + 1:])
+        return _pack_main(None, raw[raw.index("pack") + 1:])
     if first_pos == "uninstall":
         return _uninstall_main(raw[raw.index("uninstall") + 1:])
     return _bootstrap_main(raw)
@@ -209,33 +209,66 @@ def _save_user_config(path: Path, data: dict[str, Any]) -> None:
     os.replace(str(tmp), str(path))
 
 
-def _pack_main(argv: list[str]) -> int:
+def _pack_main(path: Path | None, argv: list[str]) -> int:
+    """Pack-management subcommand router.
+
+    ``path`` may be ``None``; in that case the user-level config path is
+    resolved from ``$HOME``/``$XDG_CONFIG_HOME``/``%APPDATA%``. Tests pass
+    an explicit path to exercise the helpers without env-var fixtures.
+    """
     parser = argparse.ArgumentParser(prog="anywhere-agents pack")
     sub = parser.add_subparsers(dest="action", required=True)
 
     p_add = sub.add_parser("add", help="Add a pack to user-level config")
-    p_add.add_argument("source", help="Pack source (GitHub URL or name)")
-    p_add.add_argument("--name", help="Override derived pack name")
+    p_add.add_argument("source", help="Pack source (GitHub URL or registered name)")
+    p_add.add_argument("--name", help="Override derived pack name (single-pack only)")
     p_add.add_argument("--ref", help="Pin to a specific ref (default: main)")
+    p_add.add_argument(
+        "--pack", action="append", default=[],
+        help="Remote pack name to include; repeatable. Default: include all packs in the remote manifest.",
+    )
+    p_add.add_argument(
+        "--type", choices=("skill", "rule"), default=None,
+        help="Filter remote packs by slot: 'rule' = passive-only, 'skill' = include active too (default).",
+    )
 
     p_remove = sub.add_parser("remove", help="Remove a pack from user-level config")
     p_remove.add_argument("name", help="Pack name to remove")
 
-    sub.add_parser("list", help="List packs from user-level + current project")
+    p_list = sub.add_parser("list", help="List packs from user-level + current project")
+    p_list.add_argument(
+        "--drift", action="store_true",
+        help="Read pack-lock entries and report packs whose upstream ref has moved.",
+    )
+
+    p_update = sub.add_parser(
+        "update",
+        help="Refresh a pack's user-config ref pin and re-run the project composer.",
+    )
+    p_update.add_argument("name", help="Pack name to update")
+    p_update.add_argument(
+        "--ref",
+        help="New ref to pin. Default: keep the existing ref recorded in user-level config.",
+    )
 
     args = parser.parse_args(argv)
 
-    path = _user_config_path()
+    if path is None:
+        path = _user_config_path()
     if path is None:
         log("error: cannot resolve user-level config home ($HOME / $XDG_CONFIG_HOME / %APPDATA% all unset)")
         return 2
 
     if args.action == "add":
-        return _pack_add(path, args.source, args.name, args.ref)
+        return _pack_add_v0_5(path, args)
     if args.action == "remove":
         return _pack_remove(path, args.name)
     if args.action == "list":
+        if args.drift:
+            return _pack_list_drift()
         return _pack_list(path)
+    if args.action == "update":
+        return _pack_update(path, args)
     return 2  # unreachable due to argparse required=True
 
 
@@ -313,6 +346,344 @@ def _pack_add(path: Path, source: str, name: str | None, ref: str | None) -> int
             log(f"Added {pack_name!r} to {path}")
 
     _save_user_config(path, data)
+    return 0
+
+
+# ----------------------------------------------------------------------
+# v0.5.0 pack add: remote-manifest expansion
+# ----------------------------------------------------------------------
+
+
+def _load_or_create_user_config(path: Path) -> dict[str, Any]:
+    """Return existing user-level config or a fresh empty dict.
+
+    Mirrors :func:`_load_user_config` but tolerates a missing file
+    (returns ``{}``) and migrates legacy ``rule_packs:`` to ``packs:``.
+    """
+    if not path.exists():
+        return {}
+    data = _load_user_config(path)
+    if "packs" not in data and "rule_packs" in data:
+        legacy = data.pop("rule_packs")
+        if isinstance(legacy, list):
+            data["packs"] = list(legacy)
+        else:
+            data["packs"] = []
+    elif "packs" in data and "rule_packs" in data:
+        data.pop("rule_packs", None)
+    return data
+
+
+def _write_user_config(path: Path, data: dict[str, Any]) -> None:
+    """Atomic write helper for user-level config. Thin wrapper around
+    :func:`_save_user_config` to match the helper name used in the
+    Phase 9 plan."""
+    _save_user_config(path, data)
+
+
+def _pack_add_v0_5(user_config_path: Path, args) -> int:
+    """Extended ``pack add``: fetches the remote pack.yaml, expands to
+    one user-level selection per remote pack (filtered by ``--pack`` and
+    ``--type``).
+
+    The remote manifest may declare multiple packs (e.g. ``profile`` +
+    ``paper-workflow`` + ``acad-skills`` in agent-pack). Each selected
+    pack becomes a row in the user-level config keyed by name. Missing
+    pack names print a warning to stderr and skip; ``--type rule``
+    excludes packs that declare an ``active:`` slot (passive-only filter).
+    """
+    # Credential-URL safety check first (no network).
+    import re
+    from urllib.parse import urlsplit
+    source = args.source
+    if re.match(r"^https?://[^/@]+@", source):
+        log("error: credentials in a URL are unsafe; use 'git@' SSH, 'gh auth login', or 'GITHUB_TOKEN' env")
+        return 2
+    if source.startswith("ssh://") or source.startswith("git+ssh://"):
+        try:
+            parsed = urlsplit(source)
+        except ValueError as exc:
+            log(f"error: source URL {source!r} is malformed ({exc})")
+            return 2
+        if parsed.password is not None:
+            log("error: credentials in a URL are unsafe; use 'git@' SSH, 'gh auth login', or 'GITHUB_TOKEN' env")
+            return 2
+
+    from anywhere_agents.packs import auth, source_fetch, schema
+
+    try:
+        archive = source_fetch.fetch_pack(args.source, args.ref or "main")
+    except auth.AuthChainExhaustedError as exc:
+        log(f"error: could not fetch {args.source}@{args.ref or 'main'}: {exc}")
+        return 2
+    except source_fetch.PackLockDriftError as exc:
+        log(f"error: pack-lock drift: {exc}")
+        return 2
+
+    try:
+        remote_manifest = schema.parse_manifest(archive.archive_dir / "pack.yaml")
+    except schema.ParseError as exc:
+        log(f"error: remote pack.yaml is malformed: {exc}")
+        return 2
+
+    remote_packs = remote_manifest.get("packs", [])
+    packs_by_name = {p["name"]: p for p in remote_packs}
+
+    # Codex Round 2 M5: keep remote-lookup name and output name distinct.
+    # Pre-fix, ``selected_names = [args.name]`` overrode for single-pack
+    # manifests, but the remote lookup at the loop also keyed on
+    # ``args.name``, so when ``args.name != remote_pack["name"]`` the
+    # pack was reported missing and nothing was written. Use a list of
+    # ``(remote_name, output_name)`` pairs so the lookup uses the real
+    # remote name and the user-config row uses the override.
+    if args.pack:
+        selected_pairs: list[tuple[str, str]] = [(name, name) for name in args.pack]
+        if args.name:
+            log(
+                f"warning: --name {args.name!r} ignored; "
+                f"applies only when remote manifest has exactly 1 pack and no --pack filter"
+            )
+    elif args.name and len(remote_packs) == 1:
+        only_remote_name = remote_packs[0]["name"]
+        selected_pairs = [(only_remote_name, args.name)]
+    else:
+        if args.name:
+            log(
+                f"warning: --name {args.name!r} ignored; "
+                f"applies only when remote manifest has exactly 1 pack and no --pack filter"
+            )
+        selected_pairs = [(p["name"], p["name"]) for p in remote_packs]
+
+    user_config_existed = user_config_path.exists()
+    user_config = _load_or_create_user_config(user_config_path)
+    written_names: list[str] = []
+    for remote_name, output_name in selected_pairs:
+        pack = packs_by_name.get(remote_name)
+        if pack is None:
+            print(
+                f"warning: pack {remote_name!r} not in remote manifest; skipping",
+                file=sys.stderr,
+            )
+            continue
+        if args.type == "rule" and pack.get("active"):
+            # 'rule' filter excludes active packs (passive-only request).
+            continue
+        user_config.setdefault("packs", []).append({
+            "name": output_name,
+            "source": {"url": args.source, "ref": args.ref or "main"},
+        })
+        written_names.append(output_name)
+
+    if not written_names and not user_config_existed:
+        # Filter excluded everything AND there was no pre-existing config —
+        # avoid creating an empty 'packs: []' file out of nothing.
+        log("warning: no packs matched the filter; nothing written")
+        return 0
+
+    _write_user_config(user_config_path, user_config)
+    if written_names:
+        log(f"Added {len(written_names)} pack(s) to {user_config_path}: {', '.join(written_names)}")
+    else:
+        log("warning: no packs matched the filter; nothing written")
+    return 0
+
+
+# ----------------------------------------------------------------------
+# v0.5.0 pack update: refresh a pinned ref + invoke project composer
+# ----------------------------------------------------------------------
+
+
+def _pack_update(user_config_path: Path, args) -> int:
+    """Refresh a pack's user-level ref pin and trigger a project re-compose.
+
+    Codex Round 2 H6 Option B (thin wheel): the PyPI CLI does NOT vendor
+    the full compose stack. ``pack update`` rewrites the ref pin and
+    delegates the actual update to the project-local composer at
+    ``.agent-config/repo/scripts/compose_packs.py`` with
+    ``ANYWHERE_AGENTS_UPDATE=apply`` set in the environment.
+    """
+    from anywhere_agents.packs import auth
+
+    if not user_config_path.exists():
+        log(
+            f"error: pack {args.name!r} not in user config; use `pack add` first"
+        )
+        return 2
+    user_config = _load_or_create_user_config(user_config_path)
+    packs = user_config.get("packs", [])
+    if not isinstance(packs, list):
+        log(f"error: {user_config_path} has a malformed 'packs' entry (not a list)")
+        return 2
+
+    matching = [
+        e for e in packs
+        if isinstance(e, dict) and e.get("name") == args.name
+    ]
+    if not matching:
+        log(
+            f"error: pack {args.name!r} not in user config; use `pack add` first"
+        )
+        return 2
+    entry = matching[0]
+    source = entry.get("source")
+    if isinstance(source, str):
+        url = source
+        existing_ref = entry.get("ref") or "main"
+        # Promote string-source entries to dict-source on update so the
+        # rewrite below has a place to land.
+        entry["source"] = {"url": url, "ref": existing_ref}
+        source = entry["source"]
+    elif isinstance(source, dict):
+        url = source.get("url") or source.get("repo")
+        existing_ref = source.get("ref") or entry.get("ref") or "main"
+        if not isinstance(url, str) or not url:
+            log(
+                f"error: pack {args.name!r} source has no 'url'/'repo' field"
+            )
+            return 2
+    else:
+        log(
+            f"error: pack {args.name!r} source is missing or malformed"
+        )
+        return 2
+
+    new_ref = args.ref or existing_ref
+
+    # Codex Round 2 H3-B: pre-validate the URL so a credential-bearing
+    # entry in user-config (legacy hand-edited file with
+    # ``https://ghp_TOKEN@github.com/...``) is rejected before any
+    # network call AND before the URL appears in any error message.
+    try:
+        auth.reject_credential_url(url, source_layer="user-config")
+    except auth.CredentialURLError as exc:
+        log(f"error: {exc}")
+        return 2
+
+    try:
+        resolved_commit, _method = auth.resolve_ref_with_auth_chain(url, new_ref)
+    except auth.CredentialURLError as exc:
+        # Defense-in-depth (auth.resolve_ref_with_auth_chain also
+        # validates) — keep the redacted CLI error path symmetric.
+        log(f"error: {exc}")
+        return 2
+    except auth.AuthChainExhaustedError as exc:
+        safe_url = auth.redact_url_userinfo(url)
+        log(f"error: could not resolve {safe_url}@{new_ref}: {exc}")
+        return 2
+    log(f"resolved {auth.redact_url_userinfo(url)}@{new_ref} -> {resolved_commit[:7]}")
+
+    source["ref"] = new_ref
+    # Drop a top-level "ref" key if present so the dict-source ref is the
+    # single source of truth.
+    entry.pop("ref", None)
+    _write_user_config(user_config_path, user_config)
+
+    project_root = Path.cwd()
+    composer = project_root / ".agent-config" / "repo" / "scripts" / "compose_packs.py"
+    if not composer.exists():
+        log(
+            f"error: project-local composer not found at {composer}. Run "
+            f"`bash .agent-config/bootstrap.sh` first to bootstrap."
+        )
+        return 2
+
+    env = dict(os.environ, ANYWHERE_AGENTS_UPDATE="apply")
+    result = subprocess.run(
+        [sys.executable, str(composer)],
+        cwd=str(project_root),
+        env=env,
+        check=False,
+    )
+    return result.returncode
+
+
+# ----------------------------------------------------------------------
+# v0.5.0 pack list --drift: read-only audit using auth-aware ls-remote
+# ----------------------------------------------------------------------
+
+
+def _read_all_pack_lock_entries() -> list[dict[str, Any]] | None:
+    """Read every pack entry from ``.agent-config/pack-lock.json``.
+
+    Returns a list of dicts each with at least ``name``, ``source_url``,
+    ``requested_ref``, and ``resolved_commit``. Returns an empty list
+    when no pack-lock exists or it has no packs. Returns ``None`` when
+    the pack-lock file is present but unreadable / corrupt JSON, so the
+    caller can distinguish "no data" from "error reading data".
+    """
+    lock_path = Path.cwd() / ".agent-config" / "pack-lock.json"
+    if not lock_path.exists():
+        return []
+    import json
+    try:
+        data = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log(f"error: cannot read {lock_path}: {exc}")
+        return None
+    packs = data.get("packs") if isinstance(data, dict) else None
+    if not isinstance(packs, dict):
+        return []
+    entries: list[dict[str, Any]] = []
+    for name, body in packs.items():
+        if not isinstance(body, dict):
+            continue
+        entries.append({
+            "name": name,
+            "source_url": body.get("source_url", ""),
+            "requested_ref": body.get("requested_ref", ""),
+            "resolved_commit": body.get("resolved_commit", ""),
+        })
+    return entries
+
+
+def _pack_list_drift() -> int:
+    """Read pack-lock + run auth-aware ls-remote per entry.
+
+    Read-only audit: prints drifted packs (current → new commit). On
+    ``auth.AuthChainExhaustedError`` for a single entry, prints a
+    warning to stderr and continues with the remaining entries.
+    """
+    from anywhere_agents.packs import auth
+
+    entries = _read_all_pack_lock_entries()
+    if entries is None:
+        # Pack-lock present but unreadable — surface as error rc=2 so
+        # users do not interpret silent "no drift" as a clean state.
+        return 2
+    drifted: list[tuple[str, str, str]] = []
+    for entry in entries:
+        url = entry["source_url"]
+        ref = entry["requested_ref"]
+        if not url or not ref:
+            continue
+        # Codex Round 2 H3-B: pre-validate per entry so a
+        # credential-bearing URL recorded in pack-lock (e.g., legacy
+        # hand-edited lock from a pre-v0.5.0 release) is rejected for
+        # this entry without leaking the token into the audit's stderr.
+        try:
+            auth.reject_credential_url(url, source_layer="pack-lock")
+            new_commit, _ = auth.resolve_ref_with_auth_chain(url, ref)
+        except auth.CredentialURLError as exc:
+            print(
+                f"  {entry['name']:20s} (unsafe source URL: {exc})",
+                file=sys.stderr,
+            )
+            continue
+        except auth.AuthChainExhaustedError as exc:
+            print(
+                f"  {entry['name']:20s} (could not resolve: {exc})",
+                file=sys.stderr,
+            )
+            continue
+        if new_commit != entry["resolved_commit"]:
+            drifted.append(
+                (entry["name"], entry["resolved_commit"], new_commit)
+            )
+    if not drifted:
+        print("no drift")
+        return 0
+    for name, old, new in drifted:
+        print(f"  {name:20s} {old[:7]} -> {new[:7]}")
     return 0
 
 

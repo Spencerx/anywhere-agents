@@ -9,7 +9,24 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
-### Changed
+_No unreleased changes queued._
+
+## [0.5.0] — 2026-04-26
+
+### Highlights
+
+- **Direct-URL pack consumption.** `agent-config.yaml` entries can now point at any GitHub URL with `source.url` and `source.ref`. The 4-method auth chain (SSH agent, `gh` CLI token, `GITHUB_TOKEN` env, anonymous fallback) negotiates access automatically; private repos work without manual checkouts. Public URLs succeed on anonymous; private URLs succeed on whichever authenticated method the host has configured.
+- **Trust-model shift.** The default `update_policy` flipped from `locked` to `prompt`. Each bootstrap surfaces upstream drift via a banner listing the affected packs and files; the consumer applies or skips per-run. `ANYWHERE_AGENTS_UPDATE=apply` short-circuits the prompt for CI / scripted refresh; `update_policy: locked` remains available as an explicit per-pack opt-in for content that must never auto-refresh.
+- **agent-pack v0.1.0 one-line install.** `anywhere-agents pack add https://github.com/yzhao062/agent-pack --ref v0.1.0` is the v0.5.0 acceptance test for the direct-URL path. Installs the three packs declared in the upstream `pack.yaml` (`profile`, `paper-workflow`, `acad-skills`) by default; `--pack <name>` filters to a subset.
+- **CLI additions.** `anywhere-agents pack update <name>` performs an auth-aware ref refresh against the configured source. `anywhere-agents pack list --drift` runs a read-only scan against `.agent-config/pack-lock.json` and reports any pack whose resolved commit or input hash has drifted from the lock.
+- **Internals.** `scripts/packs/{auth,source_fetch,schema,config,reconciliation}.py` are new. The `reconcile_orphans` orchestrator wrapper is now invoked by the composer's bootstrap entry path before the main compose step. The PyPI wheel vendors `auth`, `source_fetch`, and `schema` so `pipx install anywhere-agents` exposes the full CLI surface without requiring a sibling source clone.
+- **Deferred to v0.6.0: end-to-end cmd-log harness for stricter CI token-leak coverage.** v0.5.0 ships the redaction primitives (`auth.redact_url_userinfo` + `auth.redact_secret_text`) and the `tests/test_packs_auth_chain.TestRedact*` unit assertions as the v0.5.0 token-leak guard. The CI smoke step that previously gated on `.agent-config/.test-cmd-log.jsonl` was a no-op because no v0.5.0 code wrote that file; the harness will land in v0.6.0.
+
+### Migration
+
+See `MIGRATIONS.md` for the 2026-04-26 entry. Existing bootstrap caches must seed-refresh once; `bash .agent-config/bootstrap.sh` (or the PowerShell equivalent) refreshes the cache and picks up the new env wirings.
+
+### Also in this release
 
 - **Docs overhaul: README, README.zh-CN, and docs/index.md aligned to v0.4.0 pack-architecture positioning.** Replaces the v0.3-era scenario-first narrative with a 4-paragraph Why section (multi-agent, many-repos, review loop, writing rules), a 4-paragraph How It Works that explicitly carries the v0.4.0 vs v0.4.x boundary (CLI writes user-level `packs:` today; bootstrap consumes user-level + project-level `packs:` in v0.4.x; legacy project-level `rule_packs:` remains the only bootstrap-active project key in v0.4.0), a new "What This Looks Like" section with five examples in five different visual formats (session-banner screenshot, post-bootstrap repo tree, dual-agent generation Mermaid, Without/With writing-style HTML table, guard-deny terminal mock), a Pack Management CLI section with embedded `docs/pack-cli-demo.gif`, and a What's Next paragraph. zh-CN README mirrors the same structure with warm conversational tone (你, not 您) and English technical terms preserved (`pack`, `composer`, `bootstrap`, `skill`, `hook`, `guard`). Title Case applied globally to README + docs/index.md headings per RULE-G.
 - **Visual identity: USC cardinal `#990000` → warm burgundy `#8b2635`.** Hero PNG (`docs/hero.html` + re-rendered `docs/hero.png`), session-banner PNG (`docs/banner.html` + re-rendered `docs/session-banner.png`), README badge colors, Mermaid theme variables in README and three docs Mermaid blocks, and `docs/stylesheets/extra.css` for the Material light + slate schemes. Slate-mode body link contrast tuned to `#d36b77` / `#e4939b` for WCAG AA pass (4.71:1 / 6.86:1). New `docs/_render_hero.py` and `docs/_render_banner.py` helpers keep both PNGs reproducible.
@@ -441,7 +458,9 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/yzhao062/anywhere-agents/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/yzhao062/anywhere-agents/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/yzhao062/anywhere-agents/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.2.0
 [0.1.9]: https://github.com/yzhao062/anywhere-agents/releases/tag/v0.1.9

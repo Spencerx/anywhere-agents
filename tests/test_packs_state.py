@@ -123,6 +123,40 @@ class PackLockTests(_TmpDirCase):
             },
         }
 
+    def test_pack_lock_writes_prompt_policy(self) -> None:
+        """v0.5.0: pack-lock accepts pack_update_policy: prompt + effective_update_policy: prompt."""
+        path = self.root / "pack-lock.json"
+        payload = {
+            "version": state.SCHEMA_VERSION,
+            "packs": {
+                "test-pack": {
+                    "source_url": "https://example/x",
+                    "requested_ref": "main",
+                    "resolved_commit": "ab12cd34" * 5,
+                    "pack_update_policy": "prompt",
+                    "files": [{
+                        "role": "passive",
+                        "host": None,
+                        "source_path": "doc.md",
+                        "input_sha256": "abc123",
+                        "output_paths": ["AGENTS.md"],
+                        "output_scope": "project-local",
+                        "effective_update_policy": "prompt",
+                    }],
+                }
+            },
+        }
+        state.save_pack_lock(path, payload)
+        loaded = state.load_pack_lock(path)
+        self.assertEqual(
+            loaded["packs"]["test-pack"]["pack_update_policy"],
+            "prompt",
+        )
+        self.assertEqual(
+            loaded["packs"]["test-pack"]["files"][0]["effective_update_policy"],
+            "prompt",
+        )
+
     def test_unknown_role_rejects(self) -> None:
         path = self.root / "pack-lock.json"
         bad = self._minimal_passive_file_entry()

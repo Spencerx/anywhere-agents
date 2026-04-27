@@ -75,7 +75,7 @@ VALID_LOCK_ROLES = frozenset(
     }
 )
 VALID_OUTPUT_SCOPES = frozenset({"project-local", "user-level"})
-VALID_UPDATE_POLICIES = frozenset({"locked", "auto"})
+VALID_UPDATE_POLICIES = frozenset({"locked", "auto", "prompt"})
 
 # ----- user-level pack-state.json schema -----
 
@@ -193,7 +193,7 @@ def _validate_lock_pack_entry(
             raise StateError(
                 f"pack-lock {path}: packs[{pack_name!r}] missing or non-string {key!r}"
             )
-    policy = entry.get("pack_update_policy", "locked")
+    policy = entry.get("pack_update_policy", "prompt")
     if policy not in VALID_UPDATE_POLICIES:
         raise StateError(
             f"pack-lock {path}: packs[{pack_name!r}] unknown "

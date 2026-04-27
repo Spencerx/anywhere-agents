@@ -42,7 +42,11 @@ class DispatchContext:
     pack_source_url: str  # e.g. "bundled:aa" or "https://github.com/..."
     pack_requested_ref: str
     pack_resolved_commit: str
-    pack_update_policy: str  # "locked" | "auto"
+    pack_update_policy: str  # "locked" | "auto" | "prompt"
+    # In v0.4.0 dispatch read pack_update_policy as one of {locked, auto}.
+    # v0.5.0 adds 'prompt' which is resolved by compose BEFORE any apply step;
+    # dispatch never sees a pack with policy=prompt + pending drift (compose
+    # either applies or defers via pending-updates.json).
 
     # Pack source tree (where the handler reads content from).
     # For bundled:aa packs this is ``<consumer_root>/.agent-config/repo``;

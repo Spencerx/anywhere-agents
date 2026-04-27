@@ -1,8 +1,8 @@
 """Tests for scripts/packs/schema.py.
 
 Schema acceptance for both v1 (legacy passive-only) and v2 (unified) shapes;
-rejection for v0.4.0-out-of-scope features (private source URLs,
-``update_policy: auto`` on active entries, unknown kinds).
+rejection for invalid forms (private source URLs, unknown
+``update_policy`` values, unknown kinds).
 """
 from __future__ import annotations
 
@@ -178,7 +178,30 @@ class UnifiedV2Tests(_TmpDirCase):
         with self.assertRaisesRegex(schema.ParseError, r"unknown 'kind' 'widget'"):
             schema.parse_manifest(path)
 
-    def test_update_policy_auto_on_active_rejects(self) -> None:
+    def test_active_entry_accepts_auto_policy(self) -> None:
+        """v0.5.0: active entries may use update_policy: auto (was parse-rejected in v0.4.0)."""
+        path = _write_manifest(
+            self.root,
+            "version: 2\n"
+            "packs:\n"
+            "  - name: test-pack\n"
+            "    description: test\n"
+            "    source: { repo: https://example/x, ref: main }\n"
+            "    update_policy: prompt\n"
+            "    active:\n"
+            "      - kind: skill\n"
+            "        hosts: [claude-code]\n"
+            "        update_policy: auto\n"
+            "        files:\n"
+            "          - {from: skills/foo/, to: .claude/skills/foo/}\n",
+        )
+        parsed = schema.parse_manifest(path)
+        self.assertEqual(
+            parsed["packs"][0]["active"][0]["update_policy"], "auto"
+        )
+
+    def test_active_entry_unknown_update_policy_rejects(self) -> None:
+        """v0.5.0: unknown active update_policy values still parse-reject."""
         path = _write_manifest(
             self.root,
             "version: 2\n"
@@ -188,10 +211,10 @@ class UnifiedV2Tests(_TmpDirCase):
             "      - kind: hook\n"
             "        hosts: [claude-code]\n"
             "        files: [{from: x, to: y}]\n"
-            "        update_policy: auto\n",
+            "        update_policy: sporadic\n",
         )
         with self.assertRaisesRegex(
-            schema.ParseError, r"'update_policy: auto' is not allowed"
+            schema.ParseError, r"unknown 'update_policy'"
         ):
             schema.parse_manifest(path)
 
@@ -211,6 +234,37 @@ class UnifiedV2Tests(_TmpDirCase):
         self.assertEqual(
             parsed["packs"][0]["active"][0]["update_policy"], "locked"
         )
+
+    def test_pack_level_update_policy_defaults_to_prompt(self) -> None:
+        path = _write_manifest(
+            self.root,
+            "version: 2\n"
+            "packs:\n"
+            "  - name: test-pack\n"
+            "    description: test\n"
+            "    source: { repo: https://example/x, ref: main }\n"
+            "    passive:\n"
+            "      - files:\n"
+            "          - {from: doc.md, to: AGENTS.md}\n",
+        )
+        parsed = schema.parse_manifest(path)
+        self.assertEqual(parsed["packs"][0]["update_policy"], "prompt")
+
+    def test_pack_level_update_policy_accepts_prompt(self) -> None:
+        path = _write_manifest(
+            self.root,
+            "version: 2\n"
+            "packs:\n"
+            "  - name: test-pack\n"
+            "    description: test\n"
+            "    source: { repo: https://example/x, ref: main }\n"
+            "    update_policy: prompt\n"
+            "    passive:\n"
+            "      - files:\n"
+            "          - {from: doc.md, to: AGENTS.md}\n",
+        )
+        parsed = schema.parse_manifest(path)
+        self.assertEqual(parsed["packs"][0]["update_policy"], "prompt")
 
     def test_unknown_pack_level_update_policy_rejects(self) -> None:
         path = _write_manifest(

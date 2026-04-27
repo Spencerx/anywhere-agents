@@ -645,7 +645,7 @@ def fetch_with_method(
     credentials embedded in URL userinfo into ``git clone`` argv.
     """
     reject_credential_url(url, source_layer="auth.fetch_with_method")
-    from scripts.packs import source_fetch  # forward import to avoid cycles
+    from anywhere_agents.packs import source_fetch  # forward import to avoid cycles
 
     auto_created_dest = dest is None
     if dest is None:
