@@ -61,6 +61,63 @@ class PackLockDriftError(Exception):
         )
 
 
+def normalize_pack_source_url(url: str) -> str:
+    """Return a canonical form of ``url`` for identity comparison.
+
+    Used by ``pack verify`` to detect when the same pack name carries
+    different source URLs across user-level / project-level / pack-lock
+    layers. Two URLs that resolve to the same repository must normalize
+    to byte-equal strings; two URLs that resolve to different repositories
+    must remain distinct.
+
+    GitHub URLs (`github.com`, case-insensitive host) collapse to
+    ``https://github.com/<owner>/<repo>`` with **lowercased owner and
+    repo**, no trailing ``.git``, no trailing ``/``. GitHub repository
+    URLs are case-insensitive in practice, so ``Owner/Repo`` and
+    ``owner/repo`` must compare equal.
+
+    Other hosts get a minimal normalization: lowercase host, strip a
+    single trailing ``/``, strip a single trailing ``.git``. Path case is
+    **preserved** for non-GitHub hosts (other forges may be
+    case-sensitive, e.g., self-hosted Gitea).
+
+    Unparseable URLs are returned unchanged so verify never crashes; it
+    just counts them as a distinct identity.
+    """
+    if not isinstance(url, str) or not url:
+        return url
+    # auth.normalize_github_url uses a case-sensitive "github.com" host
+    # check + literal `github\.com` regex patterns. Pre-lowercase the
+    # host token so e.g. https://GitHub.COM/Owner/Repo is recognized
+    # without losing owner/repo case (which the regex captures and we
+    # lowercase below for case-insensitive identity comparison).
+    import re
+    candidate = re.sub(r"github\.com", "github.com", url, flags=re.IGNORECASE)
+    try:
+        github = auth.normalize_github_url(candidate)
+    except Exception:
+        github = None
+    if github is not None:
+        owner, repo = github
+        return f"https://github.com/{owner.lower()}/{repo.lower()}"
+    # Non-GitHub: minimal normalization. Parse host case-insensitively,
+    # strip trailing .git and trailing /, leave path case intact.
+    from urllib.parse import urlsplit, urlunsplit
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if not parts.scheme or not parts.netloc:
+        return url
+    host = parts.netloc.lower()
+    path = parts.path
+    if path.endswith("/"):
+        path = path[:-1]
+    if path.endswith(".git"):
+        path = path[:-4]
+    return urlunsplit((parts.scheme, host, path, parts.query, parts.fragment))
+
+
 def compute_cache_key(url: str, resolved_commit: str) -> str:
     """Cache key keying URL+commit to a stable directory layout.
 

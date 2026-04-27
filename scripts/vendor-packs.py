@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Vendor scripts/packs/{auth,source_fetch,schema}.py into the PyPI package.
+"""Vendor scripts/packs/{auth,source_fetch,schema,locks}.py into the PyPI package.
 
 Source of truth: scripts/packs/*.py
 Vendored copies: packages/pypi/anywhere_agents/packs/*.py
@@ -11,7 +11,7 @@ import pathlib, shutil, sys
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SRC = REPO / "scripts" / "packs"
 DST = REPO / "packages" / "pypi" / "anywhere_agents" / "packs"
-MODULES = ("auth.py", "source_fetch.py", "schema.py")
+MODULES = ("auth.py", "source_fetch.py", "schema.py", "locks.py")
 
 
 def vendor():

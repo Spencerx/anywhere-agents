@@ -9,7 +9,9 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
-_No unreleased changes queued._
+### Added
+
+- `anywhere-agents pack verify [--fix]`: audits pack deployment state across user-level config, project-level `rule_packs:` in `agent-config.yaml`, and `pack-lock.json`, by `(name, source_url, requested_ref)` identity. Exit codes: 0 (all deployed), 1 (gaps), 2 (parse error). `--fix` writes matching `rule_packs:` entries to `agent-config.yaml` for `user-level only` packs (atomic write; never modifies `pack-lock.json`). Banner Session check line gains a `⚠ N user-level pack(s) not deployed (run anywhere-agents pack verify)` warning when the count is non-zero.
 
 ## [0.5.0] — 2026-04-26
 

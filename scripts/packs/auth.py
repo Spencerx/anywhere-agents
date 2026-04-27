@@ -43,7 +43,9 @@ class CredentialURLError(ValueError):
 # ``token@``. The regex looks for ``://`` followed by a non-slash,
 # non-at-sign sequence ending in ``@``. SSH URLs (``ssh://git@host``)
 # match this pattern too — we filter SSH separately below.
-_HTTPS_USERINFO_RE = re.compile(r"^https?://[^/@]+@")
+# Scheme matching is case-insensitive: URL schemes are case-insensitive
+# per RFC 3986, so ``HTTPS://`` must reject the same as ``https://``.
+_HTTPS_USERINFO_RE = re.compile(r"^https?://[^/@]+@", re.IGNORECASE)
 
 # SSH URL prefixes whose transport username is not a credential. Listed
 # explicitly so the rejector can tell "this is SSH transport" from
@@ -72,14 +74,19 @@ def reject_credential_url(url: str, *, source_layer: str = "manifest") -> None:
     if not isinstance(url, str) or not url:
         return
 
+    # URL schemes are case-insensitive per RFC 3986; lowercase the
+    # prefix for scheme detection so ``Git@host``/``SSH://`` route
+    # through the same branches as their lowercase forms.
+    scheme_url = url.lower()
+
     # scp-style SSH (``git@host:path``) carries no password component.
-    if url.startswith("git@"):
+    if scheme_url.startswith("git@"):
         return
 
     # ssh:// / git+ssh://: parse via urlsplit and reject only if
     # password is present in userinfo. Username alone is a transport
     # identifier, not a credential.
-    if url.startswith("ssh://") or url.startswith("git+ssh://"):
+    if scheme_url.startswith("ssh://") or scheme_url.startswith("git+ssh://"):
         try:
             parsed = urlsplit(url)
         except ValueError as exc:
@@ -272,18 +279,23 @@ def redact_url_userinfo(url: str) -> str:
     if not isinstance(url, str) or not url:
         return url
 
+    # URL schemes are case-insensitive per RFC 3986; lowercase only the
+    # prefix used for scheme detection while leaving the rebuilt URL's
+    # original case intact.
+    lower_url = url.lower()
+
     # scp-style SSH (git@host:path) has transport username only.
-    if url.startswith("git@") and "://" not in url:
+    if lower_url.startswith("git@") and "://" not in url:
         return url
 
     # https://[userinfo]@host/...
-    https_match = re.match(r"^(https?)://([^/@]+)@(.+)$", url)
+    https_match = re.match(r"^(https?)://([^/@]+)@(.+)$", url, flags=re.IGNORECASE)
     if https_match:
         scheme, _userinfo, rest = https_match.groups()
         return f"{scheme}://<redacted>@{rest}"
 
     # ssh://user:pass@host/... or git+ssh://user:pass@host/...
-    ssh_match = re.match(r"^(ssh|git\+ssh)://([^:@]+):([^@]+)@(.+)$", url)
+    ssh_match = re.match(r"^(ssh|git\+ssh)://([^:@]+):([^@]+)@(.+)$", url, flags=re.IGNORECASE)
     if ssh_match:
         scheme, user, _pass, rest = ssh_match.groups()
         return f"{scheme}://{user}:<redacted>@{rest}"

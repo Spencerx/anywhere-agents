@@ -70,6 +70,65 @@ class CredentialRejectTests(unittest.TestCase):
             )
         self.assertIn("user-level", str(cm.exception))
 
+    def test_uppercase_https_userinfo_rejects(self) -> None:
+        """Regression for Round 2 Codex H3-reopened: URL schemes are
+        case-insensitive per RFC 3986, so an uppercase ``HTTPS://`` with
+        userinfo must reject the same as lowercase ``https://``.
+        """
+        with self.assertRaises(auth.CredentialURLError):
+            auth.reject_credential_url("HTTPS://ghp_secret@github.com/foo/bar")
+        with self.assertRaises(auth.CredentialURLError):
+            auth.reject_credential_url("Https://user:pass@example.com/foo")
+
+    def test_uppercase_ssh_password_rejects(self) -> None:
+        with self.assertRaises(auth.CredentialURLError):
+            auth.reject_credential_url("SSH://user:secret@github.com/owner/repo")
+        with self.assertRaises(auth.CredentialURLError):
+            auth.reject_credential_url("Git+SSH://user:secret@example.com/foo")
+
+
+class RedactUrlUserinfoTests(unittest.TestCase):
+    def test_https_userinfo_redacted(self) -> None:
+        self.assertEqual(
+            auth.redact_url_userinfo("https://ghp_secret@github.com/foo/bar"),
+            "https://<redacted>@github.com/foo/bar",
+        )
+
+    def test_uppercase_https_userinfo_redacted(self) -> None:
+        """Regression for Round 2 Codex H3-reopened: redactor must match
+        ``HTTPS://`` the same as ``https://``.
+        """
+        result = auth.redact_url_userinfo(
+            "HTTPS://ghp_secret@github.com/foo/bar"
+        )
+        self.assertNotIn("ghp_secret", result)
+        self.assertIn("<redacted>", result)
+
+    def test_ssh_password_redacted(self) -> None:
+        self.assertEqual(
+            auth.redact_url_userinfo("ssh://user:secret@github.com/owner/repo"),
+            "ssh://user:<redacted>@github.com/owner/repo",
+        )
+
+    def test_uppercase_ssh_password_redacted(self) -> None:
+        result = auth.redact_url_userinfo(
+            "SSH://user:secret@github.com/owner/repo"
+        )
+        self.assertNotIn("secret", result)
+        self.assertIn("<redacted>", result)
+
+    def test_scp_form_unchanged(self) -> None:
+        self.assertEqual(
+            auth.redact_url_userinfo("git@github.com:owner/repo.git"),
+            "git@github.com:owner/repo.git",
+        )
+
+    def test_plain_url_unchanged(self) -> None:
+        self.assertEqual(
+            auth.redact_url_userinfo("https://github.com/foo/bar"),
+            "https://github.com/foo/bar",
+        )
+
 
 class NoninteractiveFetchEnvTests(unittest.TestCase):
     def test_sets_both_flags(self) -> None:

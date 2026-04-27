@@ -218,6 +218,16 @@ anywhere-agents uninstall --all             # clean everything from the current 
 
 `pack add <url>` reads the remote `pack.yaml` and writes one user-level row per declared pack (e.g., `agent-pack` expands to `profile`, `paper-workflow`, `acad-skills`). `--ref` is optional and defaults to `main`; pin a tag for production. The CLI writes to `$XDG_CONFIG_HOME/anywhere-agents/config.yaml` (POSIX) or `%APPDATA%\anywhere-agents\config.yaml` (Windows).
 
+### Audit Pack Deployment
+
+After `pack add` writes to user-level config, the project still needs `rule_packs:` in `agent-config.yaml` for the bootstrap composer to pick up the pack. Use `pack verify` to confirm everything is wired:
+
+```bash
+anywhere-agents pack verify              # read-only audit
+anywhere-agents pack verify --fix --yes  # write missing rule_packs entries
+bash .agent-config/bootstrap.sh          # actually deploy
+```
+
 **Migrating from a project that bootstrapped from `agent-config`?** Switch upstream once with the bootstrap argv override:
 
 ```bash
@@ -237,7 +247,7 @@ rule_packs:
     source: {url: https://github.com/yzhao062/agent-pack, ref: v0.1.0}
 ```
 
-The next `bootstrap` applies them. See [`MIGRATIONS.md`](MIGRATIONS.md) for the bootstrap-cache seed-refresh that runs once on first v0.5.0 use.
+The next `bootstrap` applies them. See [`MIGRATIONS.md`](MIGRATIONS.md) for the bootstrap-cache seed-refresh that runs once on first v0.5.0 use. If `pack add` did not seem to take effect after `bootstrap.sh`, run `anywhere-agents pack verify` to see the deployment state at a glance and `--fix` to write the missing `rule_packs:` entries.
 
 For the rule-pack composition contract that backs project-level `rule_packs:`, including cache, offline behavior, and failure modes, see [`docs/rule-pack-composition.md`](docs/rule-pack-composition.md).
 

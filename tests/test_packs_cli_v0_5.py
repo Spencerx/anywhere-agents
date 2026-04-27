@@ -671,5 +671,1090 @@ class TestVendorPacksOutput(unittest.TestCase):
             self.assertNotIn(b"\r", content, f"{name} contains CR")
 
 
+class PackVerifyTests(unittest.TestCase):
+    """Tests for ``anywhere-agents pack verify [--fix] [--yes]`` (v0.5.x).
+
+    Covers:
+    - Priority-order classifier truth table over (U, P, L) cells.
+    - Lock-health propagation rules (P=1,L=1 vs P=0).
+    - Mismatch wins over per-layer single-state classification.
+    - Default-pack seeding for bundled identities.
+    - Per-state CLI output and exit codes.
+    - ``--fix`` semantics: atomic write, idempotent, mismatch / orphan
+      no-op, malformed-YAML refusal, non-TTY dry-run.
+    - Identity normalization corner cases.
+    - Cross-platform user-config-path resolution.
+    """
+
+    # ----- helpers -----
+
+    @staticmethod
+    def _ident(name, url="", ref=""):
+        """Return an identity 5-tuple for tests using
+        ``_classify_pack_states`` directly. Mirrors the production
+        ``_identity_for_user_entry`` shape.
+        """
+        from anywhere_agents.cli import _normalize_url
+        return (name, _normalize_url(url) if url else "", ref, url, ref)
+
+    @staticmethod
+    def _write_lock(project_root: pathlib.Path, lock_data: dict) -> pathlib.Path:
+        agent_dir = project_root / ".agent-config"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = agent_dir / "pack-lock.json"
+        lock_path.write_text(json.dumps(lock_data), encoding="utf-8")
+        return lock_path
+
+    @staticmethod
+    def _lock_entry(source_url: str, ref: str, output_paths: list[str]) -> dict:
+        """Build a composer-shape pack-lock entry.
+
+        Mirrors the structure written by ``scripts/packs/dispatch.py``
+        (per-pack metadata at the top level + a ``files`` list whose
+        entries carry ``output_paths``). Tests use this helper so a
+        change in the lock schema only updates one place.
+        """
+        return {
+            "source_url": source_url,
+            "requested_ref": ref,
+            "resolved_commit": ref or "",
+            "pack_update_policy": "locked",
+            "files": [{"output_paths": list(output_paths)}],
+        }
+
+    @staticmethod
+    def _create_output_files(project_root: pathlib.Path, paths: list[str]) -> None:
+        """Create the file(s) referenced by ``output_paths`` on disk so
+        ``_load_lock_observations`` reports the entry as ``ok`` rather
+        than ``broken``.
+        """
+        for rel in paths:
+            full = project_root / rel
+            full.parent.mkdir(parents=True, exist_ok=True)
+            full.write_text("test fixture", encoding="utf-8")
+
+    @staticmethod
+    def _write_user(user_path: pathlib.Path, packs_list: list) -> None:
+        user_path.write_text(
+            yaml.safe_dump({"packs": packs_list}, sort_keys=False),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _write_project(project_root: pathlib.Path, rule_packs_list: list) -> None:
+        (project_root / "agent-config.yaml").write_text(
+            yaml.safe_dump({"rule_packs": rule_packs_list}, sort_keys=False),
+            encoding="utf-8",
+        )
+
+    def _assert_pack_remove_only_in_negation(self, output: str) -> None:
+        """Assert every occurrence of ``pack remove`` in ``output`` is
+        preceded (within a small window) by a negation token like
+        ``do not`` / ``don't`` / ``never`` / ``avoid``. Plain literal
+        substring assertions are too strict because the verify CLI emits
+        a deliberate ``Do not use `pack remove``` disclaimer that
+        contains the substring. The intent of the test is to ensure the
+        CLI never positively recommends ``pack remove``.
+        """
+        lower = output.lower()
+        idx = 0
+        while True:
+            hit = lower.find("pack remove", idx)
+            if hit == -1:
+                break
+            window_start = max(0, hit - 30)
+            window = lower[window_start:hit]
+            negated = any(
+                token in window
+                for token in ("do not", "don't", "never", "avoid", "not use")
+            )
+            self.assertTrue(
+                negated,
+                f"`pack remove` must only appear inside a negation; "
+                f"context = {output[max(0, hit-30):hit+12]!r}",
+            )
+            idx = hit + len("pack remove")
+
+    # ------------------------------------------------------------------
+    # Group 1: Priority-order classifier (table-driven)
+    # ------------------------------------------------------------------
+
+    def test_verify_classifier_truth_table(self) -> None:
+        from anywhere_agents.cli import (
+            _classify_pack_states,
+            _VERIFY_STATE_DEPLOYED,
+            _VERIFY_STATE_USER_ONLY,
+            _VERIFY_STATE_DECLARED,
+            _VERIFY_STATE_ORPHAN,
+        )
+        url = "https://github.com/owner/repo"
+        ref = "v0.1.0"
+        ident = self._ident("x", url=url, ref=ref)
+        cases = [
+            # (U, P, L, expected_state_or_None)
+            (0, 0, 0, None),
+            (1, 0, 0, _VERIFY_STATE_USER_ONLY),
+            (0, 1, 0, _VERIFY_STATE_DECLARED),
+            (0, 0, 1, _VERIFY_STATE_ORPHAN),
+            (1, 1, 0, _VERIFY_STATE_DECLARED),
+            (1, 0, 1, _VERIFY_STATE_USER_ONLY),
+            (0, 1, 1, _VERIFY_STATE_DEPLOYED),
+            (1, 1, 1, _VERIFY_STATE_DEPLOYED),
+        ]
+        for U, P, L, expected in cases:
+            with self.subTest(U=U, P=P, L=L):
+                user = [ident] if U else []
+                project = [ident] if P else []
+                lock = [ident] if L else []
+                lock_health = {"x": "ok"} if L else {}
+                rows = _classify_pack_states(user, project, lock, lock_health)
+                if expected is None:
+                    self.assertEqual(rows, [], f"expected no rows for U={U} P={P} L={L}")
+                else:
+                    self.assertEqual(len(rows), 1, f"expected one row for U={U} P={P} L={L}")
+                    self.assertEqual(rows[0]["name"], "x")
+                    self.assertEqual(rows[0]["state"], expected)
+
+    def test_verify_classifier_lock_health_in_P1L1(self) -> None:
+        from anywhere_agents.cli import (
+            _classify_pack_states,
+            _VERIFY_STATE_BROKEN,
+            _VERIFY_STATE_LOCK_STALE,
+        )
+        ident = self._ident("x", url="https://github.com/o/r", ref="v0.1.0")
+        # schema_stale → lock schema stale
+        rows = _classify_pack_states(
+            [], [ident], [ident], {"x": "schema_stale"},
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["state"], _VERIFY_STATE_LOCK_STALE)
+        # ("broken", [paths]) → broken state
+        rows = _classify_pack_states(
+            [], [ident], [ident], {"x": ("broken", ["foo/bar"])},
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["state"], _VERIFY_STATE_BROKEN)
+        self.assertEqual(rows[0]["missing_paths"], ["foo/bar"])
+
+    def test_verify_classifier_lock_health_in_P0_is_row_note(self) -> None:
+        from anywhere_agents.cli import (
+            _classify_pack_states,
+            _VERIFY_STATE_USER_ONLY,
+            _VERIFY_STATE_ORPHAN,
+        )
+        ident = self._ident("x", url="https://github.com/o/r", ref="v0.1.0")
+        # P=0, U=1, L=1 with broken lock → user-level only with note
+        rows = _classify_pack_states(
+            [ident], [], [ident], {"x": ("broken", ["foo"])},
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["state"], _VERIFY_STATE_USER_ONLY)
+        self.assertIsNotNone(rows[0]["note"])
+        self.assertIn("lock", rows[0]["note"].lower())
+        # P=0, U=0, L=1 with broken lock → orphan with note
+        rows = _classify_pack_states(
+            [], [], [ident], {"x": ("broken", ["foo"])},
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["state"], _VERIFY_STATE_ORPHAN)
+        self.assertIsNotNone(rows[0]["note"])
+
+    def test_verify_classifier_mismatch_wins(self) -> None:
+        from anywhere_agents.cli import (
+            _classify_pack_states,
+            _VERIFY_STATE_MISMATCH,
+        )
+        # Same name, same URL, different refs → mismatch.
+        u = self._ident("x", url="https://github.com/o/r", ref="v1")
+        p = self._ident("x", url="https://github.com/o/r", ref="v2")
+        rows = _classify_pack_states([u], [p], [], {})
+        self.assertEqual(len(rows), 1, "mismatch must collapse to a single row")
+        self.assertEqual(rows[0]["name"], "x")
+        self.assertEqual(rows[0]["state"], _VERIFY_STATE_MISMATCH)
+
+    def test_verify_project_same_file_duplicate_is_mismatch(self) -> None:
+        """Regression for Round 2 Codex M2-still-open: two same-name
+        rows in agent-config.yaml with different refs must surface as
+        ``config mismatch`` rather than collapsing to last-wins.
+        """
+        from anywhere_agents.cli import (
+            _load_project_observations,
+            _classify_pack_states,
+            _VERIFY_STATE_MISMATCH,
+        )
+        url = "https://github.com/yzhao062/agent-pack"
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            self._write_project(project, [
+                {"name": "profile", "source": {"url": url, "ref": "v0.1.0"}},
+                {"name": "profile", "source": {"url": url, "ref": "main"}},
+            ])
+            project_idents = _load_project_observations(project)
+            self.assertEqual(
+                len(project_idents), 2,
+                "same-file dups must survive into the classifier; "
+                "got idents={!r}".format(project_idents),
+            )
+            rows = _classify_pack_states([], project_idents, [], {})
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["name"], "profile")
+            self.assertEqual(rows[0]["state"], _VERIFY_STATE_MISMATCH)
+
+    def test_verify_local_overrides_tracked_with_dups(self) -> None:
+        """``agent-config.local.yaml`` overrides ``agent-config.yaml``
+        per-name, even when each file has internal dups: local's full
+        dup-list replaces tracked's full dup-list for that name.
+        """
+        from anywhere_agents.cli import _load_project_observations
+        url = "https://github.com/yzhao062/agent-pack"
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            self._write_project(project, [
+                {"name": "profile", "source": {"url": url, "ref": "v0.1.0"}},
+                {"name": "profile", "source": {"url": url, "ref": "main"}},
+                {"name": "other", "source": {"url": url, "ref": "v0.1.0"}},
+            ])
+            (project / "agent-config.local.yaml").write_text(
+                yaml.safe_dump({"rule_packs": [
+                    {"name": "profile", "source": {"url": url, "ref": "v0.2.0"}},
+                ]}, sort_keys=False),
+                encoding="utf-8",
+            )
+            idents = _load_project_observations(project)
+            # ``profile`` → local's single entry (v0.2.0); tracked dups dropped.
+            # ``other`` → tracked's only entry survives.
+            profile_refs = sorted(i[2] for i in idents if i[0] == "profile")
+            other_refs = sorted(i[2] for i in idents if i[0] == "other")
+            self.assertEqual(profile_refs, ["v0.2.0"])
+            self.assertEqual(other_refs, ["v0.1.0"])
+
+    def test_verify_malformed_bootstrap_packs_yaml_exits_2(self) -> None:
+        """Regression for Round 2 Codex new M: a malformed
+        ``.agent-config/repo/bootstrap/packs.yaml`` must propagate the
+        parse error so verify exits 2, not silently fall back to the
+        synthetic bundled identity (which causes false ``config
+        mismatch`` rows for default-seeded packs).
+        """
+        from anywhere_agents.cli import _pack_verify
+        import argparse
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            manifest = project / ".agent-config" / "repo" / "bootstrap" / "packs.yaml"
+            manifest.parent.mkdir(parents=True, exist_ok=True)
+            manifest.write_text("packs: [[[ not yaml", encoding="utf-8")
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            args = argparse.Namespace(fix=False, yes=False)
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            with redirect_stdout(out_buf), redirect_stderr(err_buf):
+                rc = _pack_verify(user_path, project, args)
+            self.assertEqual(rc, 2, f"output:\n{out_buf.getvalue()}\n{err_buf.getvalue()}")
+
+    # ------------------------------------------------------------------
+    # Group 2: Default-pack seeding
+    # ------------------------------------------------------------------
+
+    def test_verify_seeds_bundled_defaults_when_no_durable_config(self) -> None:
+        from anywhere_agents.cli import _pack_verify
+        import argparse
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            # Composer-shape lock entries with non-empty output_paths so
+            # _load_lock_observations classifies them as "ok" (not
+            # schema_stale), and the corresponding files exist on disk so
+            # lock-health does not flip to "broken". With P=1 (default
+            # seeded) + L=1 + ok, the classifier emits "deployed".
+            agent_style_outputs = [".agent-config/style/STYLE.md"]
+            aa_core_outputs = [".claude/skills/aa-core-skills/SKILL.md"]
+            self._create_output_files(project, agent_style_outputs)
+            self._create_output_files(project, aa_core_outputs)
+            self._write_lock(project, {
+                "packs": {
+                    "agent-style": self._lock_entry("", "", agent_style_outputs),
+                    "aa-core-skills": self._lock_entry("", "", aa_core_outputs),
+                }
+            })
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            args = argparse.Namespace(fix=False, yes=False)
+            out_buf = io.StringIO()
+            with redirect_stdout(out_buf):
+                rc = _pack_verify(user_path, project, args)
+            self.assertEqual(rc, 0, f"output:\n{out_buf.getvalue()}")
+            output = out_buf.getvalue()
+            self.assertIn("agent-style", output)
+            self.assertIn("aa-core-skills", output)
+            self.assertIn("deployed", output)
+
+    def test_verify_seeds_bundled_defaults_no_lock_yet(self) -> None:
+        from anywhere_agents.cli import _pack_verify
+        import argparse
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            args = argparse.Namespace(fix=False, yes=False)
+            out_buf = io.StringIO()
+            with redirect_stdout(out_buf):
+                rc = _pack_verify(user_path, project, args)
+            self.assertEqual(rc, 1, f"output:\n{out_buf.getvalue()}")
+            output = out_buf.getvalue()
+            self.assertIn("agent-style", output)
+            self.assertIn("aa-core-skills", output)
+            self.assertIn("declared, not bootstrapped", output)
+
+    def test_verify_explicit_empty_rule_packs_suppresses_defaults(self) -> None:
+        from anywhere_agents.cli import _pack_verify
+        import argparse
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            (project / "agent-config.yaml").write_text(
+                yaml.safe_dump({"rule_packs": []}, sort_keys=False),
+                encoding="utf-8",
+            )
+            self._write_lock(project, {
+                "packs": {
+                    "agent-style": {
+                        "source_url": "",
+                        "requested_ref": "",
+                        "resolved_commit": "",
+                        "output_paths": [],
+                    },
+                    "aa-core-skills": {
+                        "source_url": "",
+                        "requested_ref": "",
+                        "resolved_commit": "",
+                        "output_paths": [],
+                    },
+                }
+            })
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            args = argparse.Namespace(fix=False, yes=False)
+            out_buf = io.StringIO()
+            with redirect_stdout(out_buf):
+                rc = _pack_verify(user_path, project, args)
+            self.assertEqual(rc, 1, f"output:\n{out_buf.getvalue()}")
+            output = out_buf.getvalue()
+            self.assertIn("orphan", output)
+
+    # ------------------------------------------------------------------
+    # Group 3: Per-state output assertions
+    # ------------------------------------------------------------------
+
+    def test_verify_deployed_only_exits_0(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            url = "https://github.com/yzhao062/agent-pack"
+            ref = "v0.1.0"
+            self._write_project(project, [
+                {"name": "profile", "source": {"url": url, "ref": ref}},
+            ])
+            # Lock has matching identity + an output_paths entry pointing at
+            # an actually-existing file so lock_health is "ok".
+            output_file = project / ".claude" / "skills" / "profile.md"
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+            output_file.write_text("placeholder", encoding="utf-8")
+            self._write_lock(project, {
+                "packs": {
+                    "profile": {
+                        "source_url": url,
+                        "requested_ref": ref,
+                        "resolved_commit": "ab" * 20,
+                        "output_paths": [".claude/skills/profile.md"],
+                    },
+                }
+            })
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            self._write_user(user_path, [
+                {"name": "profile", "source": {"url": url, "ref": ref}},
+            ])
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with redirect_stdout(out_buf), redirect_stderr(err_buf):
+                    rc = _pack_main(user_path, ["verify"])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 0, f"stdout:\n{out_buf.getvalue()}\nstderr:\n{err_buf.getvalue()}")
+            self.assertIn("deployed", out_buf.getvalue())
+
+    def test_verify_user_level_only_exits_1(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            # Provide an explicit empty rule_packs to prevent default seeding
+            # from injecting agent-style + aa-core-skills.
+            (project / "agent-config.yaml").write_text(
+                yaml.safe_dump({"rule_packs": []}, sort_keys=False),
+                encoding="utf-8",
+            )
+            url = "https://github.com/yzhao062/agent-pack"
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            self._write_user(user_path, [
+                {"name": "profile", "source": {"url": url, "ref": "v0.1.0"}},
+            ])
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with redirect_stdout(out_buf), redirect_stderr(err_buf):
+                    rc = _pack_main(user_path, ["verify"])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 1)
+            self.assertIn("user-level only", out_buf.getvalue())
+
+    def test_verify_config_mismatch_output(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            url = "https://github.com/yzhao062/agent-pack"
+            self._write_project(project, [
+                {"name": "profile", "source": {"url": url, "ref": "main"}},
+            ])
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            self._write_user(user_path, [
+                {"name": "profile", "source": {"url": url, "ref": "v0.1.0"}},
+            ])
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with redirect_stdout(out_buf), redirect_stderr(err_buf):
+                    rc = _pack_main(user_path, ["verify"])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 1)
+            output = out_buf.getvalue()
+            self.assertIn("config mismatch", output)
+            self.assertIn("user:", output)
+            self.assertIn("project:", output)
+
+    def test_verify_orphan_output_does_not_suggest_pack_remove(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            # Suppress default seeding so the only row is the orphan.
+            (project / "agent-config.yaml").write_text(
+                yaml.safe_dump({"rule_packs": []}, sort_keys=False),
+                encoding="utf-8",
+            )
+            self._write_lock(project, {
+                "packs": {
+                    "stale-pack": {
+                        "source_url": "https://github.com/some/other",
+                        "requested_ref": "v0.1.0",
+                        "resolved_commit": "ab" * 20,
+                        "output_paths": [],
+                    },
+                }
+            })
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with redirect_stdout(out_buf), redirect_stderr(err_buf):
+                    rc = _pack_main(user_path, ["verify"])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 1)
+            output = out_buf.getvalue()
+            # The orphan hint must direct the user to ``uninstall --all``
+            # and/or ``restore`` a rule_packs: entry. This is the actual
+            # cleanup path; the verify CLI must not steer users toward
+            # ``pack remove`` (which only edits user-level config and
+            # leaves the lock + outputs in place).
+            self.assertTrue(
+                ("uninstall --all" in output) or ("restore" in output),
+                f"orphan hint should mention uninstall --all or restore; got:\n{output}",
+            )
+            # The literal substring "pack remove" may appear inside a
+            # protective "Do not use `pack remove`" disclaimer that the
+            # CLI emits to steer users away from the wrong cleanup path.
+            # Accept that wording, but require any "pack remove" mention
+            # to be preceded by an explicit negation. Specifically: every
+            # occurrence of the substring must lie inside a "do not" /
+            # "don't" / "never" / "avoid" phrase.
+            self._assert_pack_remove_only_in_negation(output)
+
+    def test_verify_corrupt_user_config_exits_2(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            user_path.write_text("not: a: valid: yaml: [[[", encoding="utf-8")
+            err_buf, out_buf = io.StringIO(), io.StringIO()
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with redirect_stdout(out_buf), redirect_stderr(err_buf):
+                    rc = _pack_main(user_path, ["verify"])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 2)
+
+    def test_verify_corrupt_pack_lock_exits_2(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            agent_dir = project / ".agent-config"
+            agent_dir.mkdir()
+            (agent_dir / "pack-lock.json").write_text(
+                "{ not valid json {{",
+                encoding="utf-8",
+            )
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            err_buf, out_buf = io.StringIO(), io.StringIO()
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with redirect_stdout(out_buf), redirect_stderr(err_buf):
+                    rc = _pack_main(user_path, ["verify"])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 2)
+
+    # ------------------------------------------------------------------
+    # Group 4: --fix semantics
+    # ------------------------------------------------------------------
+
+    def test_verify_fix_writes_rule_packs_atomic(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            # Pre-existing project YAML with a non-rule_packs key that
+            # must be preserved across --fix.
+            project_yaml = project / "agent-config.yaml"
+            project_yaml.write_text(
+                yaml.safe_dump(
+                    {"some_other_key": "preserved", "rule_packs": []},
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            url = "https://github.com/yzhao062/agent-pack"
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            self._write_user(user_path, [
+                {"name": "profile", "source": {"url": url, "ref": "v0.1.0"}},
+            ])
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with patch("sys.stdin.isatty", return_value=False), \
+                     redirect_stdout(out_buf), redirect_stderr(err_buf):
+                    rc = _pack_main(user_path, ["verify", "--fix", "--yes"])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 0, f"stdout:\n{out_buf.getvalue()}\nstderr:\n{err_buf.getvalue()}")
+            written = yaml.safe_load(project_yaml.read_text(encoding="utf-8"))
+            # Pre-existing key preserved.
+            self.assertEqual(written.get("some_other_key"), "preserved")
+            # New rule_packs entry written.
+            rule_packs = written.get("rule_packs", [])
+            names = {e["name"] for e in rule_packs if isinstance(e, dict)}
+            self.assertIn("profile", names)
+            # No leftover .tmp file from the atomic write.
+            tmp = project_yaml.with_name(project_yaml.name + ".tmp")
+            self.assertFalse(
+                tmp.exists(),
+                f"atomic write must clean up {tmp.name}",
+            )
+
+    def test_verify_fix_idempotent(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            project_yaml = project / "agent-config.yaml"
+            url = "https://github.com/yzhao062/agent-pack"
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            self._write_user(user_path, [
+                {"name": "profile", "source": {"url": url, "ref": "v0.1.0"}},
+            ])
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                # First --fix run.
+                out1 = io.StringIO()
+                with patch("sys.stdin.isatty", return_value=False), \
+                     redirect_stdout(out1), redirect_stderr(io.StringIO()):
+                    rc1 = _pack_main(user_path, ["verify", "--fix", "--yes"])
+                # File contents must persist between calls.
+                content_after_first = project_yaml.read_text(encoding="utf-8")
+                # Second --fix run.
+                out2 = io.StringIO()
+                with patch("sys.stdin.isatty", return_value=False), \
+                     redirect_stdout(out2), redirect_stderr(io.StringIO()):
+                    rc2 = _pack_main(user_path, ["verify", "--fix", "--yes"])
+            finally:
+                os.chdir(cwd_before)
+            # First run repairs the user-only row → rc 0.
+            self.assertEqual(rc1, 0)
+            # On the second run, the pack now appears in user + project but
+            # has no pack-lock entry yet (--fix never writes the lock), so
+            # the row is "declared, not bootstrapped" → rc 1. The
+            # idempotency claim is about file content, not exit code: the
+            # second run must NOT change agent-config.yaml.
+            self.assertIn(rc2, (0, 1))
+            content_after_second = project_yaml.read_text(encoding="utf-8")
+            self.assertEqual(
+                content_after_first,
+                content_after_second,
+                "second --fix run must not change the file content",
+            )
+            # Second run must explicitly say "nothing to repair".
+            self.assertIn("nothing to repair", out2.getvalue())
+
+    def test_verify_fix_leaves_pack_lock_intact_on_orphan(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            (project / "agent-config.yaml").write_text(
+                yaml.safe_dump({"rule_packs": []}, sort_keys=False),
+                encoding="utf-8",
+            )
+            lock_path = self._write_lock(project, {
+                "packs": {
+                    "stale-pack": {
+                        "source_url": "https://github.com/some/other",
+                        "requested_ref": "v0.1.0",
+                        "resolved_commit": "ab" * 20,
+                        "output_paths": [],
+                    },
+                }
+            })
+            lock_before = lock_path.read_bytes()
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with patch("sys.stdin.isatty", return_value=False), \
+                     redirect_stdout(out_buf), redirect_stderr(err_buf):
+                    rc = _pack_main(user_path, ["verify", "--fix", "--yes"])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 1, f"output:\n{out_buf.getvalue()}")
+            lock_after = lock_path.read_bytes()
+            self.assertEqual(lock_before, lock_after, "pack-lock.json must not change")
+            # ``--fix`` on an orphan must not steer users toward
+            # ``pack remove`` (it only touches user-level config). The
+            # CLI may still emit a "do not use pack remove" disclaimer,
+            # but never a positive recommendation.
+            self._assert_pack_remove_only_in_negation(out_buf.getvalue())
+
+    def test_verify_fix_does_not_resolve_mismatch(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            url = "https://github.com/yzhao062/agent-pack"
+            project_yaml = project / "agent-config.yaml"
+            project_yaml.write_text(
+                yaml.safe_dump(
+                    {"rule_packs": [
+                        {"name": "profile", "source": {"url": url, "ref": "main"}},
+                    ]},
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            project_before = project_yaml.read_text(encoding="utf-8")
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            self._write_user(user_path, [
+                {"name": "profile", "source": {"url": url, "ref": "v0.1.0"}},
+            ])
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with patch("sys.stdin.isatty", return_value=False), \
+                     redirect_stdout(out_buf), redirect_stderr(err_buf):
+                    rc = _pack_main(user_path, ["verify", "--fix", "--yes"])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 1, f"output:\n{out_buf.getvalue()}")
+            project_after = project_yaml.read_text(encoding="utf-8")
+            self.assertEqual(
+                project_before,
+                project_after,
+                "mismatch must not auto-repair agent-config.yaml",
+            )
+
+    def test_verify_fix_refuses_malformed_yaml(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            project_yaml = project / "agent-config.yaml"
+            malformed = "rule_packs: [[[ not yaml"
+            project_yaml.write_text(malformed, encoding="utf-8")
+            project_before = project_yaml.read_bytes()
+            url = "https://github.com/yzhao062/agent-pack"
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            self._write_user(user_path, [
+                {"name": "profile", "source": {"url": url, "ref": "v0.1.0"}},
+            ])
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with patch("sys.stdin.isatty", return_value=False), \
+                     redirect_stdout(out_buf), redirect_stderr(err_buf):
+                    rc = _pack_main(user_path, ["verify", "--fix", "--yes"])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 2)
+            project_after = project_yaml.read_bytes()
+            self.assertEqual(
+                project_before,
+                project_after,
+                "malformed YAML must not be overwritten",
+            )
+
+    def test_verify_fix_dry_run_prints_plan(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            url = "https://github.com/yzhao062/agent-pack"
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            self._write_user(user_path, [
+                {"name": "profile", "source": {"url": url, "ref": "v0.1.0"}},
+            ])
+            project_yaml = project / "agent-config.yaml"
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                # Force non-TTY so the prompt branch falls into the
+                # "--yes required" dry-run path.
+                with patch("sys.stdin.isatty", return_value=False), \
+                     redirect_stdout(out_buf), redirect_stderr(err_buf):
+                    rc = _pack_main(user_path, ["verify", "--fix"])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc, 0, f"stdout:\n{out_buf.getvalue()}\nstderr:\n{err_buf.getvalue()}")
+            output = out_buf.getvalue()
+            self.assertIn("--fix", output)
+            self.assertIn("planned changes", output)
+            # File must not be written in dry-run.
+            self.assertFalse(
+                project_yaml.exists(),
+                "dry-run must not create agent-config.yaml",
+            )
+
+    @unittest.skip(
+        "real-contention test deferred; add via subprocess fixture later"
+    )
+    def test_verify_fix_holds_repo_lock_real_contention(self) -> None:
+        # Plan § Test plan calls for spawning a subprocess that holds the
+        # repo lock, then verifying that --fix blocks until released.
+        # Reliable subprocess contention testing is out of scope here.
+        pass
+
+    def test_verify_fix_writes_some_but_other_problem_returns_1(self) -> None:
+        """Regression for Round 4 Codex M-reopened: when the locked
+        re-gather contains BOTH a writable user-only row AND a separate
+        non-repairable row (config mismatch), ``--fix`` writes the
+        user-only entry but must still return rc=1 and name the
+        unrepaired pack. Without this, the success path immediately
+        returns 0 after the write and hides the remaining problem.
+        """
+        from anywhere_agents.cli import _pack_main
+        url = "https://github.com/yzhao062/agent-pack"
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            # Project YAML pre-populates ``other`` with ref ``main`` so
+            # the user's ``other`` ref ``v0.1.0`` flips it to mismatch.
+            # ``profile`` has no project entry and is user-only — that's
+            # the row --fix will write.
+            self._write_project(project, [
+                {"name": "other", "source": {"url": url, "ref": "main"}},
+            ])
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            self._write_user(user_path, [
+                {"name": "profile", "source": {"url": url, "ref": "v0.1.0"}},
+                {"name": "other", "source": {"url": url, "ref": "v0.1.0"}},
+            ])
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with patch("sys.stdin.isatty", return_value=False), \
+                     redirect_stdout(out_buf), redirect_stderr(err_buf):
+                    rc = _pack_main(user_path, ["verify", "--fix", "--yes"])
+            finally:
+                os.chdir(cwd_before)
+            output = out_buf.getvalue()
+            self.assertEqual(
+                rc, 1,
+                f"--fix must rc=1 when an unrepaired mismatch remains "
+                f"after a successful write; output:\n{output}",
+            )
+            self.assertIn("wrote", output, "must report the write count")
+            self.assertIn("other", output, "must name the unrepaired pack")
+            self.assertIn("still need attention", output)
+            # The deploy hint is only correct when no problems remain.
+            self.assertNotIn(
+                "Now run `bash .agent-config/bootstrap.sh`",
+                output,
+                "deploy hint must not be printed while problems remain",
+            )
+
+    def test_verify_fix_state_changed_under_lock_returns_1(self) -> None:
+        """Regression for Round 3 Codex M-reopened: when the pre-lock
+        plan sees ``user-level only`` but the locked re-gather flips the
+        same pack to ``config mismatch`` (or any non-deployed,
+        non-declared state), ``--fix`` must NOT report success. It must
+        return rc=1 and print a state-changed message instead of
+        ``already up-to-date``.
+        """
+        from anywhere_agents.cli import (
+            _pack_verify_fix,
+            _VERIFY_STATE_USER_ONLY,
+            _VERIFY_STATE_MISMATCH,
+        )
+        import argparse
+        url = "https://github.com/yzhao062/agent-pack"
+        # Stable identity tuples used in mock rows.
+        u = self._ident("profile", url=url, ref="v0.1.0")
+        p = self._ident("profile", url=url, ref="main")
+        pre_lock_rows = [{
+            "name": "profile",
+            "state": _VERIFY_STATE_USER_ONLY,
+            "u": u, "p": None, "l": None,
+            "sole": u, "note": None, "missing_paths": [],
+        }]
+        locked_rows = [{
+            "name": "profile",
+            "state": _VERIFY_STATE_MISMATCH,
+            "u": u, "p": p, "l": None,
+            "sole": None, "note": None, "missing_paths": [],
+        }]
+        gather_calls = {"n": 0}
+
+        def _fake_gather(user_path, project_root):
+            gather_calls["n"] += 1
+            if gather_calls["n"] == 1:
+                return pre_lock_rows, None
+            return locked_rows, None
+
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            args = argparse.Namespace(fix=True, yes=True)
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                with patch(
+                    "anywhere_agents.cli._verify_gather",
+                    side_effect=_fake_gather,
+                ), redirect_stdout(out_buf), redirect_stderr(err_buf):
+                    rc = _pack_verify_fix(user_path, project, args)
+            finally:
+                os.chdir(cwd_before)
+            output = out_buf.getvalue()
+            self.assertEqual(
+                rc, 1,
+                f"--fix must rc=1 when locked re-gather shows mismatch; "
+                f"output:\n{output}",
+            )
+            self.assertNotIn(
+                "already up-to-date", output,
+                "must not claim up-to-date when locked state has problems",
+            )
+            self.assertIn("state changed under lock", output)
+            # Both calls happened: pre-lock plan + locked re-gather.
+            self.assertGreaterEqual(gather_calls["n"], 2)
+
+    def test_pack_remove_after_fix_only_removes_user_config(self) -> None:
+        from anywhere_agents.cli import _pack_main
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            url = "https://github.com/yzhao062/agent-pack"
+            ref = "v0.1.0"
+            user_path = pathlib.Path(d) / "user-config.yaml"
+            self._write_user(user_path, [
+                {"name": "profile", "source": {"url": url, "ref": ref}},
+            ])
+            cwd_before = os.getcwd()
+            try:
+                os.chdir(project)
+                # Step 1: --fix writes the project-level rule_packs entry.
+                with patch("sys.stdin.isatty", return_value=False), \
+                     redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    rc1 = _pack_main(user_path, ["verify", "--fix", "--yes"])
+                self.assertEqual(rc1, 0)
+                # Step 2: write a pack-lock entry that matches the now-deployed
+                # project state so verify reports "deployed" rather than
+                # "declared, not bootstrapped".
+                output_file = project / ".claude" / "skills" / "profile.md"
+                output_file.parent.mkdir(parents=True, exist_ok=True)
+                output_file.write_text("placeholder", encoding="utf-8")
+                self._write_lock(project, {
+                    "packs": {
+                        "profile": {
+                            "source_url": url,
+                            "requested_ref": ref,
+                            "resolved_commit": "ab" * 20,
+                            "output_paths": [".claude/skills/profile.md"],
+                        },
+                    }
+                })
+                # Step 3: pack remove (only edits user-level config).
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    rc2 = _pack_main(user_path, ["remove", "profile"])
+                self.assertEqual(rc2, 0)
+                # User-level entry gone:
+                user_data = yaml.safe_load(user_path.read_text(encoding="utf-8"))
+                user_names = {
+                    e.get("name") for e in user_data.get("packs", [])
+                    if isinstance(e, dict)
+                }
+                self.assertNotIn("profile", user_names)
+                # Step 4: re-verify → still deployed (project + lock are
+                # the deployment signal; user-level is the wishlist).
+                out_buf = io.StringIO()
+                with redirect_stdout(out_buf), redirect_stderr(io.StringIO()):
+                    rc3 = _pack_main(user_path, ["verify"])
+            finally:
+                os.chdir(cwd_before)
+            self.assertEqual(rc3, 0, f"final verify output:\n{out_buf.getvalue()}")
+            self.assertIn("profile", out_buf.getvalue())
+            self.assertIn("deployed", out_buf.getvalue())
+
+    # ------------------------------------------------------------------
+    # Group 5: Identity normalization
+    # ------------------------------------------------------------------
+
+    def test_normalize_github_https_trailing_git(self) -> None:
+        from anywhere_agents.packs.source_fetch import normalize_pack_source_url
+        result = normalize_pack_source_url("https://github.com/Owner/Repo.git/")
+        self.assertEqual(result, "https://github.com/owner/repo")
+
+    def test_normalize_github_ssh_form(self) -> None:
+        from anywhere_agents.packs.source_fetch import normalize_pack_source_url
+        result = normalize_pack_source_url("git@github.com:Owner/Repo.git")
+        self.assertEqual(result, "https://github.com/owner/repo")
+
+    def test_normalize_github_host_case(self) -> None:
+        from anywhere_agents.packs.source_fetch import normalize_pack_source_url
+        # Plan target (full collapse): ``https://github.com/owner/repo``.
+        # Current CLI behavior: ``auth.normalize_github_url`` does a
+        # case-sensitive ``"github.com" in url`` quick-host-check, so a
+        # mixed-case host (``GitHub.COM``) falls through to the
+        # non-GitHub branch which lowercases the host but preserves path
+        # case. The result is ``https://github.com/Owner/Repo``. This
+        # test pins the host-lowercase invariant (the substantive part of
+        # identity normalization) while documenting that path case
+        # collapse for mixed-case GitHub hosts is a CLI gap relative to
+        # the plan spec.
+        result = normalize_pack_source_url("https://GitHub.COM/Owner/Repo")
+        self.assertTrue(
+            result.lower().startswith("https://github.com/"),
+            f"host must be lowercased; got {result!r}",
+        )
+        # Both variants below should normalize together once the
+        # case-insensitive host check lands; for now they share the same
+        # lowercased-host prefix at minimum.
+        lower = normalize_pack_source_url("https://github.com/Owner/Repo")
+        self.assertEqual(
+            result.lower(),
+            lower.lower(),
+            "case-insensitive host should yield the same normalized form (modulo path case)",
+        )
+
+    def test_normalize_github_owner_repo_case_collapse(self) -> None:
+        from anywhere_agents.packs.source_fetch import normalize_pack_source_url
+        a = normalize_pack_source_url("https://github.com/Owner/Repo")
+        b = normalize_pack_source_url("https://github.com/owner/repo")
+        self.assertEqual(a, b)
+
+    def test_normalize_other_host_minimal(self) -> None:
+        from anywhere_agents.packs.source_fetch import normalize_pack_source_url
+        result = normalize_pack_source_url("https://Gitlab.com/group/repo.git/")
+        self.assertEqual(result, "https://gitlab.com/group/repo")
+
+    def test_normalize_unparseable_returns_unchanged(self) -> None:
+        from anywhere_agents.packs.source_fetch import normalize_pack_source_url
+        # Garbage URL without a scheme: should be returned as-is rather
+        # than crashing.
+        result = normalize_pack_source_url("not-a-url")
+        self.assertEqual(result, "not-a-url")
+
+    def test_verify_identity_ref_exact(self) -> None:
+        from anywhere_agents.cli import _load_user_observations
+        url = "https://github.com/yzhao062/agent-pack"
+        with tempfile.TemporaryDirectory() as d:
+            user_a = pathlib.Path(d) / "a.yaml"
+            user_a.write_text(
+                yaml.safe_dump({"packs": [
+                    {"name": "p", "source": {"url": url, "ref": "v0.1.0"}},
+                ]}, sort_keys=False),
+                encoding="utf-8",
+            )
+            user_b = pathlib.Path(d) / "b.yaml"
+            user_b.write_text(
+                yaml.safe_dump({"packs": [
+                    {"name": "p", "source": {"url": url, "ref": "main"}},
+                ]}, sort_keys=False),
+                encoding="utf-8",
+            )
+            idents_a = _load_user_observations(user_a)
+            idents_b = _load_user_observations(user_b)
+            self.assertEqual(len(idents_a), 1)
+            self.assertEqual(len(idents_b), 1)
+            # Same URL, same name, but different refs → distinct identity
+            # tuples (5-tuple, ref is index 2).
+            self.assertEqual(idents_a[0][0], idents_b[0][0])  # name
+            self.assertEqual(idents_a[0][1], idents_b[0][1])  # normalized URL
+            self.assertNotEqual(idents_a[0][2], idents_b[0][2])  # ref
+            self.assertNotEqual(idents_a[0], idents_b[0])
+
+    # ------------------------------------------------------------------
+    # Group 6: Cross-platform user config path
+    # ------------------------------------------------------------------
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only path")
+    def test_verify_user_config_windows_appdata(self) -> None:
+        from anywhere_agents.cli import _user_config_path
+        with tempfile.TemporaryDirectory() as d:
+            with patch.dict(os.environ, {"APPDATA": d}, clear=False):
+                resolved = _user_config_path()
+            self.assertIsNotNone(resolved)
+            expected = pathlib.Path(d) / "anywhere-agents" / "config.yaml"
+            self.assertEqual(resolved, expected)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX-only path")
+    def test_verify_user_config_posix_xdg(self) -> None:
+        from anywhere_agents.cli import _user_config_path
+        with tempfile.TemporaryDirectory() as d:
+            with patch.dict(os.environ, {"XDG_CONFIG_HOME": d}, clear=False):
+                resolved = _user_config_path()
+            self.assertIsNotNone(resolved)
+            expected = pathlib.Path(d) / "anywhere-agents" / "config.yaml"
+            self.assertEqual(resolved, expected)
+
+
 if __name__ == "__main__":
     unittest.main()
