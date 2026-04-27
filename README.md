@@ -43,15 +43,21 @@ Four problems this fixes:
 
 **You want your agents to follow writing conventions automatically.** The default `agent-style` rule pack bans ~45 AI-tell words and formatting patterns; a PreToolUse guard denies any `.md` / `.tex` / `.rst` write that contains one. Without `anywhere-agents`, the banned words land in your files. With it, the guard blocks the write.
 
-**Coming next.** Private-source packs are the v0.5.0 milestone: your own skills or team conventions shipped as first-class packs, with version locks and authentication for fetches against private repos. Today you can fork and extend packs manually; private-source authoring ships next.
+**As of v0.5.0:** Direct-URL pack fetch + auth chain + drift prompts shipped. The [`agent-pack`](https://github.com/yzhao062/agent-pack) reference repo is the **blueprint** for any pack you want to author: your own profile, paper workflow, team conventions, custom skills. The pattern is fork-and-replace. Fork ap, replace its three packs with your content, tag a release, then point `pack add` at your fork:
+
+```bash
+anywhere-agents pack add https://github.com/yzhao062/agent-pack --ref v0.1.0
+```
+
+The auth chain handles private repos automatically: SSH agent → `gh` CLI → `GITHUB_TOKEN` → anonymous, in that order, with whatever you already have configured. `--ref` is optional (defaults to `main`); pin a tag for production.
 
 ## How It Works
 
 A **pack** is a small bundle (a rule set, a skill, or a permission policy) that the composer deploys to wherever it needs to land: `AGENTS.md`, `.claude/skills/`, `.claude/commands/`, `~/.claude/hooks/`, or `~/.claude/settings.json`.
 
-In v0.4.0, `bootstrap` installs the shipped defaults (`agent-style`, `aa-core-skills`) and any project-level selections from `agent-config.yaml` or `agent-config.local.yaml` when those files use the legacy `rule_packs:` key. It also accepts `AGENT_CONFIG_PACKS` as a transient name list.
+`bootstrap` installs shipped defaults (`agent-style`, `aa-core-skills`) and assembles project-active selections from `rule_packs:` in `agent-config.yaml`, `rule_packs:` in `agent-config.local.yaml`, and the `AGENT_CONFIG_PACKS` env var as a transient name list. Each entry is either a registered name (resolved against `bootstrap/packs.yaml`) or a direct-URL form with a `source: {url, ref}` field. v0.5.0's 4-method auth chain fetches both public and private repos with whatever Git authentication you already have configured.
 
-The `anywhere-agents pack add | remove | list` CLI writes `packs:` to user-level config today; `bootstrap` starts consuming that user-level file, and the project-level `packs:` key, in v0.4.x. Private-source packs land in v0.5.0.
+`update_policy` defaults to `prompt`: every bootstrap surfaces upstream drift and asks before applying. `update_policy: locked` opts a pack out for content that must never auto-refresh. The `anywhere-agents pack add | remove | list` CLI writes a forward-compat user-level manifest at `$XDG_CONFIG_HOME/anywhere-agents/config.yaml`; consuming those rows in bootstrap selection assembly is staged for v0.5.x.
 
 `bootstrap` is the sync step. Re-run it on any machine or repo, and `bootstrap` reproduces the shipped defaults plus the bootstrap-active project-level selections.
 
@@ -203,22 +209,43 @@ Install the `anywhere-agents` CLI (via `pipx install anywhere-agents` or `pip in
 
 ```bash
 anywhere-agents pack list
-anywhere-agents pack add aa-core-skills --ref v0.4.0
-anywhere-agents pack remove aa-core-skills
-anywhere-agents uninstall --all       # clean everything from the current project
+anywhere-agents pack add https://github.com/yzhao062/agent-pack --ref v0.1.0
+anywhere-agents pack update profile         # update one of the rows ap added
+anywhere-agents pack list --drift           # read-only audit against pack-lock.json
+anywhere-agents pack remove profile
+anywhere-agents uninstall --all             # clean everything from the current project
 ```
 
-The CLI writes to `$XDG_CONFIG_HOME/anywhere-agents/config.yaml` (POSIX) or `%APPDATA%\anywhere-agents\config.yaml` (Windows).
+`pack add <url>` reads the remote `pack.yaml` and writes one user-level row per declared pack (e.g., `agent-pack` expands to `profile`, `paper-workflow`, `acad-skills`). `--ref` is optional and defaults to `main`; pin a tag for production. The CLI writes to `$XDG_CONFIG_HOME/anywhere-agents/config.yaml` (POSIX) or `%APPDATA%\anywhere-agents\config.yaml` (Windows).
 
-**v0.4.0 boundary.** For pack selections that must affect `bootstrap` today, use the legacy `rule_packs:` key in `agent-config.yaml` or `agent-config.local.yaml`, or pass names through `AGENT_CONFIG_PACKS`. The `anywhere-agents pack` CLI writes user-level `packs:` config now; bootstrap starts reading that user-level file and the project-level `packs:` key in v0.4.x.
+**Migrating from a project that bootstrapped from `agent-config`?** Switch upstream once with the bootstrap argv override:
 
-For the legacy rule-pack composition contract that still backs project-level `rule_packs:` in v0.4.0, including cache, offline behavior, and failure modes, see [`docs/rule-pack-composition.md`](docs/rule-pack-composition.md).
+```bash
+# bootstrap persists the new upstream to .agent-config/upstream
+bash .agent-config/bootstrap.sh yzhao062/anywhere-agents
+```
+
+Then register `agent-pack` in your project's `agent-config.yaml` to bring back the User Profile, paper workflow, and 3 academic skills (`bibref-filler`, `dual-pass-workflow`, `figure-prompt-builder`) that lived in `agent-config`:
+
+```yaml
+rule_packs:
+  - name: profile
+    source: {url: https://github.com/yzhao062/agent-pack, ref: v0.1.0}
+  - name: paper-workflow
+    source: {url: https://github.com/yzhao062/agent-pack, ref: v0.1.0}
+  - name: acad-skills
+    source: {url: https://github.com/yzhao062/agent-pack, ref: v0.1.0}
+```
+
+The next `bootstrap` applies them. See [`MIGRATIONS.md`](MIGRATIONS.md) for the bootstrap-cache seed-refresh that runs once on first v0.5.0 use.
+
+For the rule-pack composition contract that backs project-level `rule_packs:`, including cache, offline behavior, and failure modes, see [`docs/rule-pack-composition.md`](docs/rule-pack-composition.md).
 
 ## What's Next
 
-`v0.4.0` ships the pack runtime (state files, cross-platform locks, recoverable transactions) and the pack CLI. `v0.4.x` wires the composer to acquire those locks and to reconcile installed packs against the manifest on every session start. `v0.5.0` adds private-source packs: fetch packs from private repos with the standard Git authentication you already have configured (SSH key, `gh auth login`, or `GITHUB_TOKEN`). Shipped-status details live in the [changelog](CHANGELOG.md).
+`v0.5.0` ships direct-URL pack fetch with the 4-method auth chain (SSH agent, `gh` CLI token, `GITHUB_TOKEN`, anonymous fallback), the trust-model shift to `prompt` as default `update_policy`, and the `pack update` + `pack list --drift` CLI commands. `v0.5.x` wires user-level `packs:` rows into bootstrap selection assembly so `pack add | remove | list` drives bootstrap end-to-end without project-level YAML edits. `v0.6.0` lands the end-to-end command-log harness for tighter CI token-leak coverage; v0.5.0 ships the redaction primitives and unit assertions that already cover the auth-chain primitive. Shipped-status details live in the [changelog](CHANGELOG.md).
 
-Want to author your own pack? See [`yzhao062/agent-pack`](https://github.com/yzhao062/agent-pack), a public reference repo that declares three packs (two passive, one active) using the v2 manifest schema. Fork it, replace the content with your own profile and skills, tag a release, then follow its Consumer Setup split: copy passive bodies or register pack names in a controlled bootstrap manifest for v0.4.0; use `anywhere-agents pack add <url> --ref <tag>` once v0.5.0 remote fetch lands.
+The [`agent-pack`](https://github.com/yzhao062/agent-pack) reference repo is the canonical blueprint for any pack you author: profile, paper workflow conventions, team conventions, custom skills, anything you want to share across projects. The v2 manifest schema lives there in working form. Fork ap, replace its three packs (`profile`, `paper-workflow`, `acad-skills`) with your content, tag a release, then `anywhere-agents pack add https://github.com/<you>/<your-pack> --ref <tag>`. To make bootstrap apply your pack today, register it under `rule_packs:` in `agent-config.yaml`; the user-level path becomes bootstrap-active in v0.5.x.
 
 ## Deeper Docs
 
@@ -292,9 +319,9 @@ anywhere-agents/
 │   ├── guard.py                   # PreToolUse hook: 4 gate families (dest-git/gh ask; compound cd / writing-style / banner deny)
 │   ├── generate_agent_configs.py  # tag-based generator (AGENTS.md -> CLAUDE.md + codex.md)
 │   ├── session_bootstrap.py       # SessionStart hook: runs bootstrap automatically
-│   ├── compose_packs.py           # v0.4.0 composer: reads manifest, dispatches passive + active kinds
+│   ├── compose_packs.py           # v2 composer: bundled packs, direct URLs, drift prompt, locks, state
 │   ├── compose_rule_packs.py      # legacy v0.3 rule-pack composer (kept for BC)
-│   ├── packs/                     # v0.4.0 primitives: config, state, locks, transaction, kind handlers
+│   ├── packs/                     # pack modules: auth, config, source fetch, state, locks, transaction, handlers
 │   ├── pre-push-smoke.sh          # pre-push real-agent smoke (validates current checkout)
 │   └── remote-smoke.sh            # post-publish real-agent smoke (validates published install)
 ├── skills/
@@ -348,7 +375,7 @@ anywhere-agents/
 
 - Not a general-purpose framework or plugin host. The `anywhere-agents` CLI is narrow: it bootstraps a project (zero-install via `pipx run` / `npx`) and manages user-level pack selections (`pack add | remove | list | uninstall`). Nothing more.
 - Not a universal multi-agent sync tool. Claude Code + Codex is the supported set. Other agents (Cursor, Aider, Gemini CLI) may work via the `AGENTS.md` convention but are not tested here.
-- Not a marketplace or registry. One curated configuration, two first-party packs (`agent-style`, `aa-core-skills`), one maintainer. Third-party packs from arbitrary sources land in v0.5.0.
+- Not a marketplace or registry. One curated configuration, two first-party packs (`agent-style`, `aa-core-skills`), one maintainer. Third-party packs from arbitrary GitHub URLs work via the v0.5.0 direct-URL flow.
 
 </details>
 

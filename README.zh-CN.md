@@ -43,17 +43,23 @@
 
 **你想 agent 写东西自动不带 AI 味儿。** 默认的 `agent-style` rule pack 禁了 ~45 个典型 AI-tell 词和格式（em-dash 当随手用、散文被切成 bullet 之类），再加一个 PreToolUse `guard`，任何 `.md` / `.tex` / `.rst` 的 tool 调用只要 outgoing 里撞上这些词，`guard` 直接 deny。没它，那些词就进你文件了；有它，写入在落盘前就被拦下来。
 
-**下一步。** v0.5.0 的目标是 private-source packs：把你自己的 skill 或团队约定做成标准 pack，带版本锁，也能从需要认证的私有 repo 拉取。现在你可以 fork 后手动改 pack；v0.5.0 会把私有来源和认证链补齐。
+**v0.5.0 已经发了：** Direct-URL pack fetch + auth chain + drift prompt 都已经发布。[`agent-pack`](https://github.com/yzhao062/agent-pack) 这个参考 repo 是任何 pack 的**蓝本**：你自己的 profile、paper workflow、团队约定、自定义 skill，全都按这个形状来。模式就是 fork-and-replace。fork ap，把它的三个 pack 换成你自己的内容，打 tag 发布，然后让 `pack add` 指向你 fork 的版本：
+
+```bash
+anywhere-agents pack add https://github.com/yzhao062/agent-pack --ref v0.1.0
+```
+
+私有 repo 自动走 auth chain：SSH agent → `gh` CLI → `GITHUB_TOKEN` → 匿名，按这个顺序，用你已经配好的那一套就够。`--ref` 可选，省略时默认 `main`；生产环境 pin tag。
 
 ## 工作原理
 
 一个 **pack** 就是一个小包：一组规则、一个 skill、或者一份权限策略。`composer` 把它送到该到的位置 —— `AGENTS.md`、`.claude/skills/`、`.claude/commands/`、`~/.claude/hooks/`、或 `~/.claude/settings.json`。
 
-v0.4.0 里，`bootstrap` 装两样东西：自带的默认 pack（`agent-style` 和 `aa-core-skills`），以及 `agent-config.yaml` / `agent-config.local.yaml` 里项目级的选项 —— 注意 **v0.4.0 里只有老的 `rule_packs:` key 才被 bootstrap 读**。外加 `AGENT_CONFIG_PACKS` 环境变量作为临时列表。
+`bootstrap` 装自带的默认 pack（`agent-style` 和 `aa-core-skills`），并从这些来源组装项目级 selection：`agent-config.yaml` 里的 `rule_packs:`、`agent-config.local.yaml` 里的 `rule_packs:`，加 `AGENT_CONFIG_PACKS` 环境变量作为临时列表。每个 entry 要么是已注册的 pack 名（在 `bootstrap/packs.yaml` 里查），要么是 direct-URL 形式带 `source: {url, ref}` 字段。v0.5.0 的 4-method auth chain 用你已经配好的标准 Git 认证拉公开和私有 repo。
 
-`anywhere-agents pack add | remove | list` 这个 CLI 现在把 `packs:` 写到用户级配置。`bootstrap` 开始读用户级文件、以及项目级的 `packs:` key，是 v0.4.x 的事。Private-source packs 在 v0.5.0。
+`update_policy` 默认是 `prompt`：每次 bootstrap 把上游 drift 列出来，你说装才装。`update_policy: locked` 是给那种永远不能自动刷新的内容做的 per-pack 退出。`anywhere-agents pack add | remove | list` CLI 写一份用户级 forward-compat manifest 到 `$XDG_CONFIG_HOME/anywhere-agents/config.yaml`；让 bootstrap selection assembly 真正读这些 row 是 v0.5.x 的 scope。
 
-`bootstrap` 就是同步那一步。换一台机器或 repo 再跑一遍，结果一致：自带默认 + 当前 v0.4.0 里实际被读到的项目级选项。
+`bootstrap` 就是同步那一步。换一台机器或 repo 再跑一遍，结果一致：自带默认 + 你声明的项目级 selection。
 
 ## 长什么样
 
@@ -205,20 +211,43 @@ Invoke-WebRequest -UseBasicParsing -Uri https://raw.githubusercontent.com/yzhao0
 
 ```bash
 anywhere-agents pack list
-anywhere-agents pack add aa-core-skills --ref v0.4.0
-anywhere-agents pack remove aa-core-skills
-anywhere-agents uninstall --all       # 把当前项目里的所有东西清掉
+anywhere-agents pack add https://github.com/yzhao062/agent-pack --ref v0.1.0
+anywhere-agents pack update profile         # 更新 ap 装出来的其中一行
+anywhere-agents pack list --drift           # 只读 audit，对比 pack-lock.json
+anywhere-agents pack remove profile
+anywhere-agents uninstall --all             # 把当前项目里的所有东西清掉
 ```
 
-CLI 写到 `$XDG_CONFIG_HOME/anywhere-agents/config.yaml`（POSIX）或 `%APPDATA%\anywhere-agents\config.yaml`（Windows）。
+`pack add <url>` 读远端 `pack.yaml`，按 manifest 里声明的每个 pack 写一行用户级配置（比如 `agent-pack` 展开成 `profile`、`paper-workflow`、`acad-skills` 三行）。`--ref` 可选，省略时默认 `main`；生产环境 pin tag。CLI 写到 `$XDG_CONFIG_HOME/anywhere-agents/config.yaml`（POSIX）或 `%APPDATA%\anywhere-agents\config.yaml`（Windows）。
 
-**v0.4.0 边界。** 如果你要让 `bootstrap` 现在就读到 pack 选项，用老的 `rule_packs:` key 写到 `agent-config.yaml` / `agent-config.local.yaml`，或者走 `AGENT_CONFIG_PACKS` 环境变量。`anywhere-agents pack` CLI 现在把 `packs:` 写到用户级配置；`bootstrap` 读用户级文件和项目级的 `packs:` key，是 v0.4.x 的事。
+**项目原本是从 `agent-config` bootstrap 的，怎么过渡？** 一次性把 upstream 切到 `anywhere-agents`：
 
-v0.4.0 里仍然支持项目级 `rule_packs:` 的那套 composition 契约（manifest、cache、离线行为、失败模式），见 [`docs/rule-pack-composition.md`](docs/rule-pack-composition.md)。
+```bash
+# bootstrap 会把新 upstream 持久化到 .agent-config/upstream
+bash .agent-config/bootstrap.sh yzhao062/anywhere-agents
+```
+
+然后在项目的 `agent-config.yaml` 里把 `agent-pack` 注册进 `rule_packs:`，把原来 `agent-config` 自带的 User Profile、paper workflow、3 个学术 skill（`bibref-filler`、`dual-pass-workflow`、`figure-prompt-builder`）补回来：
+
+```yaml
+rule_packs:
+  - name: profile
+    source: {url: https://github.com/yzhao062/agent-pack, ref: v0.1.0}
+  - name: paper-workflow
+    source: {url: https://github.com/yzhao062/agent-pack, ref: v0.1.0}
+  - name: acad-skills
+    source: {url: https://github.com/yzhao062/agent-pack, ref: v0.1.0}
+```
+
+下一次 `bootstrap` 就会把这些 pack 应用上。bootstrap cache 在第一次跑 v0.5.0 时需要做一次 seed-refresh，详情见 [`MIGRATIONS.md`](MIGRATIONS.md)。
+
+项目级 `rule_packs:` 的那套 composition 契约（manifest、cache、离线行为、失败模式）见 [`docs/rule-pack-composition.md`](docs/rule-pack-composition.md)。
 
 ## 下一步
 
-`v0.4.0` 发的是 pack runtime（state 文件、跨平台锁、可恢复的事务）加上 pack CLI。`v0.4.x` 把 composer 接上这些锁，以及每次 session 启动自动对齐 installed pack 和 manifest。`v0.5.0` 加上 private-source packs：用你已经配好的标准 Git 认证（SSH key、`gh auth login`、或 `GITHUB_TOKEN`）从私有 repo 拉 pack。发布状态详情在 [changelog](CHANGELOG.md)。
+`v0.5.0` 发的是 direct-URL pack fetch、4-method auth chain（SSH agent、`gh` CLI token、`GITHUB_TOKEN`、匿名 fallback）、信任模型转向（`update_policy` 默认从 `locked` 改成 `prompt`），加上 `pack update` + `pack list --drift` 这两个 CLI 命令。`v0.5.x` 把用户级 `packs:` row 接进 bootstrap selection assembly，让 `pack add | remove | list` 不需要改项目 YAML 就能驱动 bootstrap。`v0.6.0` 把 end-to-end command-log harness 接上来收紧 CI token-leak 覆盖；v0.5.0 自带的 redaction primitives 和 unit assertions 已经覆盖 auth-chain primitive。发布状态详情在 [changelog](CHANGELOG.md)。
+
+[`agent-pack`](https://github.com/yzhao062/agent-pack) 这个参考 repo 是任何 pack 作者的**蓝本**：profile、paper workflow 约定、团队约定、自定义 skill，所有你想跨项目复用的 personalization 都按这个形状来。v2 manifest schema 在那里以可工作的形态摆着。fork ap，把它的三个 pack（`profile`、`paper-workflow`、`acad-skills`）换成你自己的内容，打 tag 发布，然后用 `anywhere-agents pack add https://github.com/<your-user>/<your-repo> --ref <tag>`。要让 bootstrap 现在就应用你的 pack，把它注册到 `agent-config.yaml` 的 `rule_packs:` 下；用户级路径在 v0.5.x 才会变成 bootstrap-active。
 
 ## 更深的文档
 
@@ -292,9 +321,9 @@ anywhere-agents/
 │   ├── guard.py                   # PreToolUse hook: 4 gate families (dest-git/gh ask; compound cd / writing-style / banner deny)
 │   ├── generate_agent_configs.py  # tag-based generator (AGENTS.md -> CLAUDE.md + codex.md)
 │   ├── session_bootstrap.py       # SessionStart hook: runs bootstrap automatically
-│   ├── compose_packs.py           # v0.4.0 composer: reads manifest, dispatches passive + active kinds
+│   ├── compose_packs.py           # v2 composer: bundled pack、direct URL、drift prompt、locks、state
 │   ├── compose_rule_packs.py      # legacy v0.3 rule-pack composer (kept for BC)
-│   ├── packs/                     # v0.4.0 primitives: config, state, locks, transaction, kind handlers
+│   ├── packs/                     # pack 模块: auth、config、source fetch、state、locks、transaction、handlers
 │   ├── pre-push-smoke.sh          # pre-push real-agent smoke (validates current checkout)
 │   └── remote-smoke.sh            # post-publish real-agent smoke (validates published install)
 ├── skills/
@@ -328,7 +357,12 @@ anywhere-agents/
 <details>
 <summary><b>Related Projects（相关项目）</b></summary>
 
-如果你想要的是通用的多 agent 同步工具、或者更大的 skill 目录，以下几个走的是不同方向：
+**同一系列。** `anywhere-agents` 和两个公开 repo 一起发：
+
+- [`agent-style`](https://github.com/yzhao062/agent-style)：写作规则 pack，每个 consumer 的 `AGENTS.md` 默认会装。21 条规则（12 经典 + 9 LLM 实测），每条带 BAD → GOOD 例子。
+- [`agent-pack`](https://github.com/yzhao062/agent-pack)：第三方 pack 作者的公开参考。用 v2 manifest 声明 3 个 pack（passive profile、passive paper-workflow、active 学术 skill）。想做自己的 pack repo，fork 它当起点。
+
+**走不同方向的工具。** 如果你要的是通用多 agent 同步工具、或者更大的 skill 目录：
 
 - [iannuttall/dotagents](https://github.com/iannuttall/dotagents) — hook / command / skill / AGENTS-CLAUDE.md 文件的中心位置
 - [microsoft/agentrc](https://github.com/microsoft/agentrc) — 把 repo 改成 AI-ready 的工具链
@@ -343,7 +377,7 @@ anywhere-agents/
 
 - 不是通用的 framework 或 plugin host。`anywhere-agents` CLI 很窄：bootstrap 一个项目（`pipx run` / `npx` 零安装），以及管用户级 pack 选项（`pack add | remove | list | uninstall`）。除此没别的。
 - 不是通用的多 agent 同步工具。支持的是 Claude Code + Codex 这套。其他 agent（Cursor、Aider、Gemini CLI）可能通过 `AGENTS.md` 约定工作，但没测过。
-- 不是 marketplace 或 registry。一份精选配置，两个官方 pack（`agent-style`、`aa-core-skills`），一个维护者。第三方任意来源的 pack 在 v0.5.0。
+- 不是 marketplace 或 registry。一份精选配置，两个官方 pack（`agent-style`、`aa-core-skills`），一个维护者。第三方任意 GitHub URL 来源的 pack 走 v0.5.0 的 direct-URL flow。
 
 </details>
 

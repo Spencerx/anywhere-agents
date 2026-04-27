@@ -1,10 +1,10 @@
 #!/bin/bash
 # Demo-only wrapper for pack-cli-demo.tape.
 #
-# Runs the v0.4.0 CLI from the mounted source tree inside the vhs Docker
-# image, with no pip install required. The wrapper gets copied into
-# /usr/local/bin during docs/_render_gif.sh so typing `anywhere-agents`
-# in the recorded session just works.
+# Runs the anywhere-agents CLI from the mounted source tree inside the
+# vhs Docker image, with no pip install required. The wrapper gets copied
+# into /usr/local/bin during docs/_render_gif.sh so typing
+# `anywhere-agents` in the recorded session just works.
 PYTHONPATH=/vhs/packages/pypi exec python3 -c '
 import sys
 sys.argv[0] = "anywhere-agents"
