@@ -7,7 +7,12 @@ a stable yzhao062/CV ref + file + sha256.
 """
 from __future__ import annotations
 import json, pathlib, subprocess, sys
-import pytest
+
+try:
+    import pytest
+except ImportError:
+    import unittest as _ut
+    raise _ut.SkipTest("pytest required for integration tests")
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
