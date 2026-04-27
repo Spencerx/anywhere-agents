@@ -16,11 +16,10 @@ MODULES = ("auth.py", "source_fetch.py", "schema.py")
 
 def vendor():
     DST.mkdir(parents=True, exist_ok=True)
-    (DST / "__init__.py").write_text(
-        '"""Vendored copies of scripts/packs/* for the installed CLI."""\n',
-        encoding="utf-8",
-        newline="\n",
-    )
+    # Path.write_text(newline=) is 3.10+. Use open() with newline="\n" so
+    # vendored output is LF-only on Windows too, supporting Python 3.9+.
+    with open(DST / "__init__.py", "w", encoding="utf-8", newline="\n") as f:
+        f.write('"""Vendored copies of scripts/packs/* for the installed CLI."""\n')
     for name in MODULES:
         src_file = SRC / name
         dst_file = DST / name
@@ -34,7 +33,8 @@ def vendor():
             "import scripts.packs",
             "import anywhere_agents.packs",
         )
-        dst_file.write_text(body, encoding="utf-8", newline="\n")
+        with open(dst_file, "w", encoding="utf-8", newline="\n") as f:
+            f.write(body)
 
 
 def _vendored_text(src_file: pathlib.Path) -> str:
