@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "anywhere-agents"
-version = "0.5.5"
+version = "0.5.6"
 description = "Install the anywhere-agents AI agent config (AGENTS.md, skills, guard hook, settings) into any project."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -50,7 +50,23 @@ Changelog = "https://github.com/yzhao062/anywhere-agents/blob/main/CHANGELOG.md"
 anywhere-agents = "anywhere_agents.cli:main"
 
 [tool.setuptools]
-packages = ["anywhere_agents", "anywhere_agents.packs"]
+packages = [
+  "anywhere_agents",
+  "anywhere_agents.packs",
+  "anywhere_agents.composer",
+  "anywhere_agents.composer.bootstrap",
+  "anywhere_agents.composer.scripts",
+  "anywhere_agents.composer.scripts.packs",
+  "anywhere_agents.composer.scripts.packs.handlers",
+  "anywhere_agents.composer.skills",
+]
+
+[tool.setuptools.package-data]
+anywhere_agents = [
+  "composer/bootstrap/*.yaml",
+  "composer/.claude/commands/*.md",
+  "composer/skills/**/*",
+]
 
 [tool.pytest.ini_options]
 markers = ["integration: real-creds smoke tests; opt-in via -m integration"]

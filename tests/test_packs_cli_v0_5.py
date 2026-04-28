@@ -290,7 +290,7 @@ class TestPackUpdate(unittest.TestCase):
         }))
         return cfg
 
-    def test_pack_update_invokes_project_composer(self) -> None:
+    def test_pack_update_uses_project_composer_when_bundled_absent(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
             cfg = self._seed_user_config(root)
@@ -307,6 +307,8 @@ class TestPackUpdate(unittest.TestCase):
                  patch("anywhere_agents.cli.Path") as mocked_path, \
                  patch.object(auth, "resolve_ref_with_auth_chain",
                               return_value=("cd" * 20, "anonymous")), \
+                 patch("anywhere_agents.cli._bundled_composer_path",
+                       return_value=None), \
                  patch("anywhere_agents.cli.subprocess.run",
                        return_value=mock_proc) as run_mock:
                 # Make Path.cwd() return our project dir; everything else
@@ -324,7 +326,7 @@ class TestPackUpdate(unittest.TestCase):
             # subprocess.run was called with the composer path and the
             # ANYWHERE_AGENTS_UPDATE=apply env var.
             args, kwargs = run_mock.call_args
-            self.assertIn("compose_packs.py", args[0][1])
+            self.assertEqual(pathlib.Path(args[0][1]), composer)
             self.assertEqual(kwargs["env"]["ANYWHERE_AGENTS_UPDATE"], "apply")
 
     def test_pack_update_missing_pack_returns_error(self) -> None:
@@ -386,6 +388,108 @@ class TestPackUpdate(unittest.TestCase):
                 pre_content, post_content,
                 "user config must not be modified when resolve fails",
             )
+
+
+class TestInvokeComposer(unittest.TestCase):
+    def test_prefers_bundled_composer_when_project_copy_exists(self) -> None:
+        from anywhere_agents import cli
+
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            project = root / "project"
+            project_composer = (
+                project / ".agent-config" / "repo" / "scripts" / "compose_packs.py"
+            )
+            project_composer.parent.mkdir(parents=True)
+            project_composer.write_text("# stale project composer\n", encoding="utf-8")
+            bundled = root / "bundled" / "compose_packs.py"
+            bundled.parent.mkdir()
+            bundled.write_text("# current package composer\n", encoding="utf-8")
+
+            with patch.object(cli, "_bundled_composer_path", return_value=bundled), \
+                 patch("anywhere_agents.cli.subprocess.run") as run_mock:
+                run_mock.return_value = MagicMock(returncode=0)
+                rc = cli._invoke_composer(project)
+
+        self.assertEqual(rc, 0)
+        cmd = run_mock.call_args.args[0]
+        self.assertEqual(pathlib.Path(cmd[1]), bundled)
+        self.assertIn("--root", cmd)
+        self.assertIn(str(project), cmd)
+
+    def test_missing_project_composer_still_requires_bootstrap(self) -> None:
+        from anywhere_agents import cli
+
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            bundled = pathlib.Path(d) / "bundled" / "compose_packs.py"
+            bundled.parent.mkdir()
+            bundled.write_text("# current package composer\n", encoding="utf-8")
+            err_buf = io.StringIO()
+            with patch.object(cli, "_bundled_composer_path", return_value=bundled), \
+                 patch("anywhere_agents.cli.subprocess.run") as run_mock, \
+                 redirect_stderr(err_buf):
+                rc = cli._invoke_composer(project)
+
+        self.assertEqual(rc, 2)
+        run_mock.assert_not_called()
+        self.assertIn("Run bootstrap first", err_buf.getvalue())
+
+    def test_env_extra_is_passed_to_bundled_composer(self) -> None:
+        from anywhere_agents import cli
+
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            project = root / "project"
+            project_composer = (
+                project / ".agent-config" / "repo" / "scripts" / "compose_packs.py"
+            )
+            project_composer.parent.mkdir(parents=True)
+            project_composer.write_text("# stale project composer\n", encoding="utf-8")
+            bundled = root / "bundled" / "compose_packs.py"
+            bundled.parent.mkdir()
+            bundled.write_text("# current package composer\n", encoding="utf-8")
+
+            with patch.object(cli, "_bundled_composer_path", return_value=bundled), \
+                 patch("anywhere_agents.cli.subprocess.run") as run_mock:
+                run_mock.return_value = MagicMock(returncode=0)
+                rc = cli._invoke_composer(
+                    project,
+                    env_extra={"ANYWHERE_AGENTS_UPDATE": "apply"},
+                )
+
+        self.assertEqual(rc, 0)
+        cmd = run_mock.call_args.args[0]
+        kwargs = run_mock.call_args.kwargs
+        self.assertEqual(pathlib.Path(cmd[1]), bundled)
+        self.assertEqual(kwargs["env"]["ANYWHERE_AGENTS_UPDATE"], "apply")
+
+    def test_args_are_passed_to_bundled_composer_without_root_flag(self) -> None:
+        from anywhere_agents import cli
+
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            project = root / "project"
+            project_composer = (
+                project / ".agent-config" / "repo" / "scripts" / "compose_packs.py"
+            )
+            project_composer.parent.mkdir(parents=True)
+            project_composer.write_text("# stale project composer\n", encoding="utf-8")
+            bundled = root / "bundled" / "compose_packs.py"
+            bundled.parent.mkdir()
+            bundled.write_text("# current package composer\n", encoding="utf-8")
+
+            with patch.object(cli, "_bundled_composer_path", return_value=bundled), \
+                 patch("anywhere_agents.cli.subprocess.run") as run_mock:
+                run_mock.return_value = MagicMock(returncode=0)
+                rc = cli._invoke_composer(project, "uninstall", "profile")
+
+        self.assertEqual(rc, 0)
+        cmd = run_mock.call_args.args[0]
+        self.assertEqual(pathlib.Path(cmd[1]), bundled)
+        self.assertEqual(cmd[2:], ["uninstall", "profile"])
+        self.assertNotIn("--root", cmd)
 
 
 class TestPackListDrift(unittest.TestCase):

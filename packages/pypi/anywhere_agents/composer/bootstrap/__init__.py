@@ -1,0 +1,1 @@
+"""Bundled composer manifest data."""

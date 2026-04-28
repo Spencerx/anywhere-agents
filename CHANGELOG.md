@@ -11,6 +11,17 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 _No unreleased changes queued._
 
+## [0.5.6] — 2026-04-28
+
+### Fixed
+
+- **Package-owned composer for repair commands.** `pack add`, `pack verify --fix`, `pack remove`, and `pack update` now invoke the composer shipped with the installed PyPI package after confirming the project is already bootstrapped. This fixes the v0.5.5 failure mode where `pipx install --force anywhere-agents==0.5.5` upgraded the CLI, but `pack verify --fix` still ran an older `.agent-config/repo/scripts/compose_packs.py` and left `aa-core-skills` missing.
+- **Bundled pack sources are read from the composer owner.** The composer now reads bundled manifests and bundled active-pack files from the source tree that owns the running composer. In a normal bootstrap this is `.agent-config/repo`; in the PyPI repair path this is the wheel's bundled `anywhere_agents/composer` tree. Stale project caches can no longer keep the current CLI from writing current bundled defaults.
+
+### Tests
+
+- Added direct coverage that `_invoke_composer` prefers the package-bundled composer when a project-local composer exists, while still returning the existing "Run bootstrap first" error when the project has not been bootstrapped.
+
 ## [0.5.5] — 2026-04-27
 
 ### Highlights
@@ -576,7 +587,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.5...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.6...HEAD
+[0.5.6]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/yzhao062/anywhere-agents/compare/v0.5.2...v0.5.3

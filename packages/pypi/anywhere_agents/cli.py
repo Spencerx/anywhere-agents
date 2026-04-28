@@ -799,24 +799,52 @@ def _append_to_project_config(
     return 0
 
 
-def _invoke_composer(project_root: Path, *args: str) -> int:
-    """Subprocess invocation of ``.agent-config/repo/scripts/compose_packs.py``.
+def _bundled_composer_path() -> Path | None:
+    """Return the PyPI-wheel bundled composer path when available."""
+    candidate = (
+        Path(__file__).resolve().parent
+        / "composer"
+        / "scripts"
+        / "compose_packs.py"
+    )
+    return candidate if candidate.exists() else None
+
+
+def _invoke_composer(
+    project_root: Path,
+    *args: str,
+    env_extra: dict[str, str] | None = None,
+) -> int:
+    """Subprocess invocation of the current package's composer.
 
     The composer self-locks (per-user + per-repo) so the CLI must NOT
     hold any outer lock across this call. ``args`` are passed through
     verbatim (e.g., ``"uninstall <name>"`` for the v0.5.2 single-pack
     uninstall mode).
+
+    A bootstrapped project is still required, but the CLI prefers the
+    composer bundled with the installed PyPI package over the potentially
+    stale project-local copy. This lets ``pipx install --force`` repair a
+    project even when ``.agent-config/repo`` is one release behind or the
+    bootstrap network refresh failed.
     """
-    composer = project_root / ".agent-config" / "repo" / "scripts" / "compose_packs.py"
-    if not composer.exists():
+    project_composer = (
+        project_root / ".agent-config" / "repo" / "scripts" / "compose_packs.py"
+    )
+    if not project_composer.exists():
         log(
-            f"error: composer not found at {composer}. Run bootstrap first."
+            f"error: composer not found at {project_composer}. Run bootstrap first."
         )
         return 2
+    composer = _bundled_composer_path() or project_composer
     cmd = [sys.executable, str(composer)] + list(args)
     if not args:
         cmd.extend(["--root", str(project_root)])
-    result = subprocess.run(cmd, cwd=str(project_root), check=False)
+    env = None
+    if env_extra:
+        env = dict(os.environ)
+        env.update(env_extra)
+    result = subprocess.run(cmd, cwd=str(project_root), env=env, check=False)
     return result.returncode
 
 
@@ -986,11 +1014,11 @@ def _pack_add_v0_5(user_config_path: Path, args) -> int:
 def _pack_update(user_config_path: Path, args) -> int:
     """Refresh a pack's user-level ref pin and trigger a project re-compose.
 
-    Codex Round 2 H6 Option B (thin wheel): the PyPI CLI does NOT vendor
-    the full compose stack. ``pack update`` rewrites the ref pin and
-    delegates the actual update to the project-local composer at
-    ``.agent-config/repo/scripts/compose_packs.py`` with
-    ``ANYWHERE_AGENTS_UPDATE=apply`` set in the environment.
+    ``pack update`` rewrites the ref pin and delegates the actual update
+    to the current package's bundled composer with
+    ``ANYWHERE_AGENTS_UPDATE=apply`` set in the environment. A
+    bootstrapped project-local composer must still exist as the project
+    signal, but it is not trusted to be current.
     """
     from anywhere_agents.packs import auth
 
@@ -1069,22 +1097,10 @@ def _pack_update(user_config_path: Path, args) -> int:
     _write_user_config(user_config_path, user_config)
 
     project_root = Path.cwd()
-    composer = project_root / ".agent-config" / "repo" / "scripts" / "compose_packs.py"
-    if not composer.exists():
-        log(
-            f"error: project-local composer not found at {composer}. Run "
-            f"`bash .agent-config/bootstrap.sh` first to bootstrap."
-        )
-        return 2
-
-    env = dict(os.environ, ANYWHERE_AGENTS_UPDATE="apply")
-    result = subprocess.run(
-        [sys.executable, str(composer)],
-        cwd=str(project_root),
-        env=env,
-        check=False,
+    return _invoke_composer(
+        project_root,
+        env_extra={"ANYWHERE_AGENTS_UPDATE": "apply"},
     )
-    return result.returncode
 
 
 # ----------------------------------------------------------------------
