@@ -242,7 +242,9 @@ class TestCacheHitAndIntegrity(unittest.TestCase):
             self.assertEqual(second.resolved_commit, sha)
             # The replacement slot must have a fresh, valid dir-sha256.
             recorded = (second.archive_dir / ".dir-sha256").read_text()
-            self.assertTrue(recorded.startswith("dir-sha256:"))
+            self.assertTrue(
+                recorded.startswith(source_fetch._DIRHASH_V2_PREFIX)
+            )
 
 
 class TestCanonicalIdDedup(unittest.TestCase):
@@ -313,8 +315,12 @@ class TestDirSha256Helpers(unittest.TestCase):
             tmp_path = pathlib.Path(tmp)
             (tmp_path / "f.txt").write_text("hi")
             sha = source_fetch._compute_dir_sha256(tmp_path)
-            self.assertTrue(sha.startswith("dir-sha256:"))
-            self.assertEqual(len(sha), len("dir-sha256:") + 64)
+            # v2 label, not the bare pre-anywhere-agents#18 one. The
+            # digest is self-identifying so a recorded value selects the
+            # encoder that verifies it.
+            prefix = source_fetch._DIRHASH_V2_PREFIX
+            self.assertTrue(sha.startswith(prefix))
+            self.assertEqual(len(sha), len(prefix) + 64)
 
     def test_archive_root_recovers_nested_clone_cache_slot(self):
         """Recover cache slots produced by failed Windows stale-dir cleanup."""

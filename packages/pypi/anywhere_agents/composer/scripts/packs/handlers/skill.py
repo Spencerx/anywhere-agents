@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .. import dirhash
 from ..dispatch import DispatchContext
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -186,6 +187,31 @@ def _maybe_auto_emit_pointer(
     )
 
 
+def _is_archive_root_metadata(path: Path, archive_root: Path) -> bool:
+    """Return True for the fetch layer's own files at the archive root.
+
+    A pack cache slot carries two things that belong to ``source_fetch``
+    rather than to the pack: the clone's ``.git/`` tree and the
+    ``.dir-sha256`` marker recording that slot's hash. When a manifest
+    maps the archive root itself as a skill directory, both would
+    otherwise be copied into the consumer's repository.
+
+    Scoped to the archive **root** on purpose. ``.git`` and
+    ``.dir-sha256`` are only special there; anywhere deeper they are
+    ordinary content. Treating the names as disposable at any depth is
+    what let ``pack uninstall`` remove ``.git/refs/stash`` and a nested
+    ``docs/.dir-sha256`` with no drift warning, and it also made this
+    site silently drop a file the archive-cache hash counts as content.
+    """
+    try:
+        rel = path.relative_to(archive_root)
+    except ValueError:
+        return False
+    if rel.parts and rel.parts[0] == ".git":
+        return True
+    return rel.as_posix() == ".dir-sha256"
+
+
 def _stage_dir_copy(
     src_dir: Path, dst_dir: Path, ctx: DispatchContext
 ) -> str:
@@ -195,21 +221,36 @@ def _stage_dir_copy(
 
     Files are iterated in sorted path order so the merkle hash is
     reproducible across filesystems whose ``rglob`` order differs.
+
+    Two filters apply, and they are deliberately separate:
+
+    * :func:`packs.dirhash.is_artifact` drops regenerable tool state,
+      which is what anywhere-agents#18 is about.
+    * :func:`_is_archive_root_metadata` drops the clone metadata and
+      hash marker that belong to the *archive cache root*. That rule
+      lives here rather than in the shared predicate because only this
+      site knows where the archive root is; a ``.git/`` or
+      ``.dir-sha256`` anywhere else is ordinary content, and treating it
+      otherwise let ``pack uninstall`` delete local-only git state with
+      no drift warning.
+
+    The copy and the hash share one iterator on purpose: a file set that
+    differed between the two would record a hash no read site could ever
+    reproduce.
     """
-    hasher = hashlib.sha256()
-    entries: list[Path] = sorted(
-        (p for p in src_dir.rglob("*") if p.is_file()),
-        key=lambda p: str(p.relative_to(src_dir)).replace("\\", "/"),
+    archive_root = ctx.pack_source_dir.resolve()
+    hasher = dirhash.new_dir_hasher()
+    entries = sorted(
+        (
+            item
+            for item in dirhash.iter_content_files(src_dir)
+            if not _is_archive_root_metadata(item[0], archive_root)
+        ),
+        key=lambda item: item[2],
     )
-    for src_file in entries:
-        rel = src_file.relative_to(src_dir)
-        rel_posix = str(rel).replace("\\", "/")
-        dst_file = dst_dir / rel
+    for src_file, _rel_posix, rel_parts in entries:
+        dst_file = dst_dir / src_file.relative_to(src_dir)
         content = src_file.read_bytes()
         ctx.txn.stage_write(dst_file, content)
-        # Merkle encoding: path (posix-normalized) + null + content + null.
-        hasher.update(rel_posix.encode("utf-8"))
-        hasher.update(b"\0")
-        hasher.update(content)
-        hasher.update(b"\0")
-    return f"dir-sha256:{hasher.hexdigest()}"
+        dirhash.update_dir_hasher(hasher, rel_parts, content)
+    return f"{dirhash.V2_PREFIX}{hasher.hexdigest()}"

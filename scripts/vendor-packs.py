@@ -11,6 +11,14 @@ import pathlib, shutil, sys
 REPO = pathlib.Path(__file__).resolve().parent.parent
 SRC = REPO / "scripts" / "packs"
 DST = REPO / "packages" / "pypi" / "anywhere_agents" / "packs"
+# Kept explicit rather than computed, so the shipped surface stays
+# reviewable. The cost is that every module reachable from a listed
+# module's imports has to be added here by hand: miss one and the
+# vendored package imports cleanly from the repo but raises ImportError
+# once installed. ``check()`` compares text only and cannot catch that,
+# so ``tests/test_vendored_package_imports.py`` imports the vendored tree
+# in an isolated subprocess and statically asserts the import closure
+# (anywhere-agents#18).
 MODULES = ("auth.py", "source_fetch.py", "schema.py", "locks.py")
 
 

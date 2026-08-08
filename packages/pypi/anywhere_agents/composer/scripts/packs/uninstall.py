@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import dirhash
 from . import locks
 from . import state as state_mod
 
@@ -286,9 +287,13 @@ def _delete_project_local(
 
     if target.is_dir():
         # Directory outputs: verify hash via merkle (dir-sha256:...).
-        if expected_sha and expected_sha.startswith("dir-sha256:"):
-            actual = _dir_sha256(target)
-            if actual != expected_sha:
+        # Accepts both digest labels; a bare startswith on the legacy
+        # label would treat every v2 value as a plain file sha.
+        if expected_sha and dirhash.is_dir_digest(expected_sha):
+            # Either hash form counts as a match, so a lock recorded
+            # before the artifact filter existed still verifies
+            # (anywhere-agents#18).
+            if not dirhash.matches_any(target, {expected_sha}):
                 outcome.drift_paths.append(out_path)
                 outcome.details.append(
                     f"drift: directory {out_path!r} no longer matches "
@@ -789,17 +794,10 @@ def _decrement_user_level_permissions(
 def _dir_sha256(path: Path) -> str:
     """Compute the merkle-style dir-sha256 of ``path`` in the same
     format that scripts/packs/handlers/skill.py emits, so the two
-    hashes compare directly."""
-    hasher = hashlib.sha256()
-    entries = sorted(
-        (p for p in path.rglob("*") if p.is_file()),
-        key=lambda p: str(p.relative_to(path)).replace("\\", "/"),
-    )
-    for src_file in entries:
-        rel = str(src_file.relative_to(path)).replace("\\", "/")
-        content = src_file.read_bytes()
-        hasher.update(rel.encode("utf-8"))
-        hasher.update(b"\0")
-        hasher.update(content)
-        hasher.update(b"\0")
-    return f"dir-sha256:{hasher.hexdigest()}"
+    hashes compare directly.
+
+    Build artifacts are excluded; see :mod:`packs.dirhash`. Without the
+    filter a stray ``__pycache__`` made this report drift and refuse to
+    remove a directory that was otherwise untouched (anywhere-agents#18).
+    """
+    return dirhash.dir_sha256(path)

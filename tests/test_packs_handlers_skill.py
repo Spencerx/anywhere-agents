@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from packs import dirhash  # noqa: E402
 from packs import dispatch  # noqa: E402
 from packs import handlers  # noqa: E402 — side-effect: registers handlers
 from packs import state as state_mod  # noqa: E402
@@ -160,7 +161,11 @@ class SkillDirectoryCopyTests(_TmpDirCase):
         ]
         self.assertEqual(len(active_skill_entries), 1)
         file_entry = active_skill_entries[0]
-        self.assertTrue(file_entry["input_sha256"].startswith("dir-sha256:"))
+        # v2 label. A bare startswith("dir-sha256:") would be False here,
+        # since "dir-sha256-v2:" is not an extension of the legacy label.
+        self.assertTrue(
+            file_entry["input_sha256"].startswith(dirhash.V2_PREFIX)
+        )
 
     def test_dir_sha256_is_stable_across_sort_order(self) -> None:
         """The merkle hash is path-sorted, so the same content in any

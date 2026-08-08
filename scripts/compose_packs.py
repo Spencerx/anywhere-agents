@@ -53,6 +53,7 @@ if str(_REPO_ROOT) not in sys.path:
 import compose_rule_packs as legacy  # noqa: E402
 from packs import auth  # noqa: E402
 from packs import config as config_mod  # noqa: E402
+from packs import dirhash  # noqa: E402
 from packs import dispatch  # noqa: E402
 from packs import handlers  # noqa: E402 — side-effect: registers handlers
 from packs import locks  # noqa: E402
@@ -114,24 +115,19 @@ _HISTORICAL_SHA_RING_CAP = 5
 
 
 def _dir_sha256(path: Path) -> str:
-    """Return a Merkle-style sha256 over a directory's files.
+    """Return a Merkle-style sha256 over a directory's content files.
 
     Files are sorted by POSIX-relative path for determinism. Format:
     ``dir-sha256:<hex>`` to match the per-pack-lock recording convention.
     Raises ``OSError`` on permission errors (caller should handle).
+
+    Build artifacts are excluded from the hash input; see
+    :mod:`packs.dirhash` for why and for the exclusion set. Comparison
+    sites should call :func:`packs.dirhash.matches_any` rather than
+    comparing this value alone, so a lock recorded before the filter
+    existed still matches.
     """
-    hasher = hashlib.sha256()
-    entries = sorted(
-        (p for p in path.rglob("*") if p.is_file()),
-        key=lambda p: str(p.relative_to(path)).replace("\\", "/"),
-    )
-    for child in entries:
-        rel_posix = str(child.relative_to(path)).replace("\\", "/")
-        hasher.update(rel_posix.encode("utf-8"))
-        hasher.update(b"\0")
-        hasher.update(child.read_bytes())
-        hasher.update(b"\0")
-    return f"dir-sha256:{hasher.hexdigest()}"
+    return dirhash.dir_sha256(path)
 
 
 def _push_historical_sha(ring: list[str], sha: str | None) -> list[str]:
@@ -226,24 +222,36 @@ def _build_prior_pack_outputs(
                     #
                     # Filter known_shas to dir-sha256:... entries only — plain
                     # file sha256 values (no prefix) are never dir-merkle hashes.
+                    # Both digest labels count. A bare
+                    # startswith("dir-sha256:") would drop every v2 value,
+                    # because "dir-sha256-v2:" is not an extension of it.
                     dir_known: set[str] = {
-                        s for s in known_shas if s.startswith("dir-sha256:")
+                        s for s in known_shas if dirhash.is_dir_digest(s)
                     }
                     if dir_known:
                         try:
-                            on_disk_dir_sha = _dir_sha256(abs_path)
+                            # Accepts either the filtered hash or the legacy
+                            # unfiltered one, so a stray build artifact is not
+                            # mistaken for a user edit in either direction
+                            # (anywhere-agents#18).
+                            matched = dirhash.matches_any(abs_path, dir_known)
                         except OSError:
                             continue
-                        if on_disk_dir_sha not in dir_known:
+                        if not matched:
                             # Dir has been user-modified (or was never managed
                             # by aa at this path).  Do NOT walk — files fall to
                             # PRESTATE_UNMANAGED and the drift gate will protect
                             # them.
                             continue
                     try:
-                        for child in abs_path.rglob("*"):
-                            if not child.is_file():
-                                continue
+                        # Same exclusion as the dir hash above, so a build
+                        # artifact is never recorded as an aa-managed pack
+                        # output. It is inert either way (compose never
+                        # targets that path), but registering one would
+                        # misrepresent what aa owns.
+                        for child, _rel, _parts in dirhash.iter_content_files(
+                            abs_path
+                        ):
                             try:
                                 file_sha = hashlib.sha256(
                                     child.read_bytes()

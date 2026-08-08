@@ -144,6 +144,18 @@ def _iter_content_files(archive_dir: pathlib.Path):
     in its own hash on subsequent runs, so the cache-hit integrity
     check would always fail. ``.git/`` is clone metadata, not pack
     content, and varies across clones of the same commit.
+
+    **Do not replace this with :func:`packs.dirhash.is_artifact`.** The
+    two filters look interchangeable and are not. This one guards the
+    archive cache, where *any* file can be a manifest's ``files[].from``
+    source: the schema puts no suffix restriction on that value, so a
+    hook mapping may legitimately read ``hook.py.orig`` and deploy it as
+    ``deployed.py``. Ignoring a name here would leave the cache marker
+    valid after those bytes changed, and the handler would deploy the
+    mutation. The deployed-tree predicate can afford a short ignore-list
+    because it only ever skips files nothing reads; this side cannot.
+    Reproduced during the anywhere-agents#18 review, which is why the
+    unification attempted there was reverted.
     """
     for path in archive_dir.rglob("*"):
         if not path.is_file():
@@ -156,23 +168,56 @@ def _iter_content_files(archive_dir: pathlib.Path):
         yield path
 
 
+# Framing for the archive-cache digest. Deliberately duplicated from
+# ``packs.dirhash`` rather than imported: this module is vendored into the
+# installed wheel as a small standalone subset, and it must not depend on
+# the deployed-tree predicate (see ``_iter_content_files`` above for why
+# the two file-selection rules have to stay apart). The duplication is
+# pinned by an encoder-equality test in ``tests/test_dirhash_artifacts.py``
+# so the two cannot drift.
+_DIRHASH_V2_DOMAIN = b"anywhere-agents-dir-sha256-v2\0"
+_DIRHASH_V2_PREFIX = "dir-sha256-v2:"
+_LEN_BYTES = 8
+
+
 def _compute_dir_sha256(archive_dir: pathlib.Path) -> str:
     """Stable Merkle hash over the archive directory's content files.
 
-    Produces ``dir-sha256:<hex>``. Hashes the relative posix path, a
-    null byte, the file bytes, then a null byte for each file in
-    sorted order. The null separators block boundary-collision attacks
-    (file ``a`` with content ``b/c`` vs file ``a/b`` with content ``c``).
+    Produces ``dir-sha256-v2:<hex>``. Files are sorted by their path
+    components; each contributes a component count, then every component
+    length-prefixed, then length-prefixed content, all under a domain
+    tag.
+
+    Two ambiguities in the previous framing are what this shape closes.
+    It separated fields with a null byte on the theory that paths cannot
+    contain one; paths cannot, but **file content can**, so one file
+    holding ``b"x\\0b\\0y"`` produced the same byte stream as two files
+    holding ``b"x"`` and ``b"y"``. It also joined the relative path into
+    one string, and on POSIX a backslash is a legal filename character,
+    so a file named ``a\\b`` encoded the same as file ``b`` inside
+    directory ``a``. Length prefixes fix the first; component-wise
+    encoding fixes the second, because a separator never enters the byte
+    stream for a filename to forge.
+
+    Cache slots recorded under the old framing fail their integrity check
+    once and are refetched, which is the intended recovery.
     """
-    paths = sorted(_iter_content_files(archive_dir))
+    entries = sorted(
+        (p.relative_to(archive_dir).parts, p)
+        for p in _iter_content_files(archive_dir)
+    )
     h = hashlib.sha256()
-    for p in paths:
-        rel = p.relative_to(archive_dir).as_posix()
-        h.update(rel.encode("utf-8"))
-        h.update(b"\0")
-        h.update(p.read_bytes())
-        h.update(b"\0")
-    return f"dir-sha256:{h.hexdigest()}"
+    h.update(_DIRHASH_V2_DOMAIN)
+    for parts, p in entries:
+        content = p.read_bytes()
+        h.update(len(parts).to_bytes(_LEN_BYTES, "big"))
+        for part in parts:
+            part_bytes = part.encode("utf-8")
+            h.update(len(part_bytes).to_bytes(_LEN_BYTES, "big"))
+            h.update(part_bytes)
+        h.update(len(content).to_bytes(_LEN_BYTES, "big"))
+        h.update(content)
+    return f"{_DIRHASH_V2_PREFIX}{h.hexdigest()}"
 
 
 def _remove_readonly(func, path, _exc_info):
