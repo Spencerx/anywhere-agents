@@ -9,6 +9,16 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
+## [0.7.10] — 2026-08-09
+
+### Fixed
+
+- **A missing Python interpreter no longer makes a repository unreviewable.** v0.7.9 added an execution probe that resolves an absolute interpreter before dispatch, and made resolving nothing a hard `exit 2`. That was the wrong severity. The probe exists to keep a reviewer from claiming verification it never ran, and check 10 already enforces that independently by refusing a `PASS` or `BLOCK` verdict without a `VERIFIED` status. Reviews also run on repositories whose verification is not Python at all (LaTeX, Node, docs), so aborting made those unreviewable on any machine without a discoverable interpreter. `dispatch-codex.{sh,ps1}` now warn on stderr and proceed, tell the reviewer that no interpreter was pre-resolved, and omit `<state-dir>/python-interpreter` entirely rather than writing a sentinel a reader could mistake for a path. A configured but broken `ANYWHERE_AGENTS_PYTHON` stays a hard failure: the user named an interpreter and it does not work.
+
+- **Two shared-contract test files now exist in both repositories (the reason v0.7.9 shipped the defect above).** `tests/test_dispatch_path_resolution.py` covers `dispatch-codex.{sh,ps1}` and `tests/test_codex_usage.py` covers `scripts/statusline.py`. Both target STRICT-shared code, and both were `agent-config`-local, so this repository's CI never ran them. The v0.7.9 commit was green on `windows-latest` here and red on nine dispatch fixtures there, on the same code. `scripts/check-parity.sh` now gates both files, which is what its own comment already claimed the strict-test list was for: a shared-contract change must mirror its tests in the same commit.
+
+- **The npm publish job no longer chases a moving engine floor.** The v0.7.9 release published to PyPI and then failed at npm with `EBADENGINE`: the job ran Node 20 and installed `npm@latest`, which had moved to 12.0.2 and raised its floor to `^22.22.2 || ^24.15.0 || >=26`. Tracking `npm@latest` means every npm major that raises its Node floor breaks publishing on the release itself, after the GitHub release has already fired and PyPI has already accepted the upload. The job now runs Node 24 and pins `npm@11`, which satisfies the OIDC trusted-publishing floor of 11.5.1. npm has no 0.7.9; PyPI has a 0.7.9 superseded by this release.
+
 ## [0.7.9] — 2026-08-09
 
 ### Fixed
@@ -963,7 +973,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.9...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.10...HEAD
+[0.7.10]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.9...v0.7.10
 [0.7.9]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.8...v0.7.9
 [0.7.8]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.7...v0.7.8
 [0.7.7]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.6...v0.7.7

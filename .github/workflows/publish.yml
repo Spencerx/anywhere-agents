@@ -58,11 +58,21 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
-      # npm Trusted Publishing (OIDC) needs npm >= 11.5.1; node 20 ships npm 10.x.
-      - name: Upgrade npm for OIDC trusted publishing
-        run: npm install -g npm@latest
+      # npm Trusted Publishing (OIDC) needs npm >= 11.5.1. Node 24 already
+      # bundles an 11.x npm, so the install below is a floor guarantee rather
+      # than a version chase.
+      #
+      # Both halves are pinned deliberately. The v0.7.9 publish failed here
+      # with EBADENGINE: the job ran node 20 and asked for npm@latest, which
+      # had moved to 12.0.2 and raised its engine floor to
+      # ^22.22.2 || ^24.15.0 || >=26. Tracking npm@latest means every npm major
+      # that raises its node floor breaks publishing at the worst moment, on
+      # the release itself, after the GitHub release has already fired. Pin the
+      # npm major and bump it on purpose.
+      - name: Pin npm to an OIDC-capable major
+        run: npm install -g npm@11
       # No NODE_AUTH_TOKEN: with a configured Trusted Publisher on npm and
       # id-token: write, npm authenticates via OIDC. --provenance is implied by
       # trusted publishing but kept explicit for clarity.
