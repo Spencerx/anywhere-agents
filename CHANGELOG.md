@@ -9,6 +9,10 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
+_No unreleased changes queued._
+
+## [0.7.11] — 2026-08-10
+
 ### Changed
 
 - **Bootstrap no longer re-asks the network questions it already answered (issue #20).** A steady-state compose, one where every pack reports `unchanged` and no output content changes, went from 7.29 s to 3.88 s measured over repeated runs in a real five-pack consumer. Such a run still performs durable writes: active skill entries restage every file they own, and the composer always stages `AGENTS.md`, `pack-lock.json`, and the project `pack-state.json` (plus user state when nonempty). Permission entries are not part of that set, since they stage a settings merge only when the entry is newly created. That write set is where the durable-write cost noted below comes from. Bootstrap runs at every session start in every consumer, so this is latency the user feels every time.
@@ -987,7 +991,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.10...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.11...HEAD
+[0.7.11]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.10...v0.7.11
 [0.7.10]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.9...v0.7.10
 [0.7.9]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.8...v0.7.9
 [0.7.8]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.7...v0.7.8
