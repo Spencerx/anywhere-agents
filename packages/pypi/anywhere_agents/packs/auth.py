@@ -24,6 +24,7 @@ itself (SSH agent → gh CLI → GITHUB_TOKEN → anonymous) lands in v0.5.0.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 from typing import Mapping
@@ -215,12 +216,52 @@ def canonical_github_identity(url: str) -> str | None:
 import subprocess
 
 
+# Probe results describe the environment, not any one pack, so they cannot
+# change while a single compose run is in flight. Before this cache, every
+# pack that walked the auth chain re-ran the probes: a five-pack consumer
+# spent roughly 1.8 s of a 7 s bootstrap re-asking `gh auth status` the same
+# question. The cache lives inside the probe functions rather than at the
+# caller so a test that patches `ssh_agent_available` or
+# `gh_cli_authenticated` replaces the cache along with the body, which keeps
+# the auth-chain tests probing exactly as they did before.
+#
+# `github_token_available` is deliberately not cached: it reads an
+# environment variable, so it costs nothing and caching it would only add a
+# staleness window.
+#
+# The cache is off unless a caller opens a scope. Module-level state that is
+# live by default would outlast the run that wanted it: a long-lived process
+# such as the CLI running verify and then compose would carry one probe
+# result across both operations, and every test touching the probes would
+# inherit whatever the previous test cached.
+_PROBE_CACHE: dict[str, bool] | None = None
+
+
+@contextlib.contextmanager
+def probe_cache():
+    """Answer each auth probe at most once for the duration of the block.
+
+    Nesting restores the enclosing scope's cache on exit, so a caller that
+    opens a scope inside another caller's scope cannot clear it.
+    """
+    global _PROBE_CACHE
+    previous = _PROBE_CACHE
+    _PROBE_CACHE = {}
+    try:
+        yield
+    finally:
+        _PROBE_CACHE = previous
+
+
 def ssh_agent_available() -> bool:
     """Return True iff ``ssh-add -l`` reports at least one identity.
 
     Used by the auth chain to skip the ssh path when no key is loaded
-    (avoids a slow ssh handshake that would fail anyway).
+    (avoids a slow ssh handshake that would fail anyway). The result is
+    cached for the run; see :func:`probe_cache`.
     """
+    if _PROBE_CACHE is not None and "ssh" in _PROBE_CACHE:
+        return _PROBE_CACHE["ssh"]
     try:
         result = subprocess.run(
             ["ssh-add", "-l"],
@@ -230,12 +271,21 @@ def ssh_agent_available() -> bool:
             env=noninteractive_fetch_env(),
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0
+        available = False
+    else:
+        available = result.returncode == 0
+    if _PROBE_CACHE is not None:
+        _PROBE_CACHE["ssh"] = available
+    return available
 
 
 def gh_cli_authenticated() -> bool:
-    """Return True iff ``gh auth status`` reports a logged-in github.com host."""
+    """Return True iff ``gh auth status`` reports a logged-in github.com host.
+
+    The result is cached for the run; see :func:`probe_cache`.
+    """
+    if _PROBE_CACHE is not None and "gh" in _PROBE_CACHE:
+        return _PROBE_CACHE["gh"]
     try:
         result = subprocess.run(
             ["gh", "auth", "status"],
@@ -245,8 +295,12 @@ def gh_cli_authenticated() -> bool:
             env=noninteractive_fetch_env(),
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0
+        authenticated = False
+    else:
+        authenticated = result.returncode == 0
+    if _PROBE_CACHE is not None:
+        _PROBE_CACHE["gh"] = authenticated
+    return authenticated
 
 
 def github_token_available() -> bool:

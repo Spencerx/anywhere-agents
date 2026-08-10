@@ -913,5 +913,111 @@ class TestComposeUnderCodexHostSkipsClaudeOnlyDefaults(unittest.TestCase):
         self.assertNotIn("aa-core-skills", names)
 
 
+class TestRunScopedCaches(unittest.TestCase):
+    """``main`` is the run boundary for the auth-probe and resolve caches.
+
+    Scoping them to the call rather than to the process is what keeps a
+    long-lived caller, such as the CLI running verify and then compose,
+    from carrying one probe answer or one resolved commit across two
+    operations.
+    """
+
+    def _record_scope_state(self):
+        # Read the auth module through ``source_fetch``, which is the object
+        # the fetch path actually calls. ``packs.auth`` and
+        # ``scripts.packs.auth`` are distinct module objects with
+        # independent globals, so importing ``packs.auth`` here would
+        # observe a cache that no production call ever reads, and would
+        # pass while the probe scope was open on the wrong object.
+        return (
+            source_fetch._REF_RESOLUTION_CACHE is not None,
+            source_fetch.auth._PROBE_CACHE is not None,
+        )
+
+    def test_main_opens_both_scopes_for_the_run(self):
+        seen = {}
+
+        def fake_body(argv=None):
+            seen["state"] = self._record_scope_state()
+            return 0
+
+        with patch.object(compose_packs, "_compose_main", fake_body):
+            rc = compose_packs.main([])
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["state"], (True, True))
+
+    def test_scopes_close_when_the_run_finishes(self):
+        with patch.object(compose_packs, "_compose_main", lambda argv=None: 0):
+            compose_packs.main([])
+        self.assertEqual(self._record_scope_state(), (False, False))
+
+    def test_scopes_close_when_the_run_raises(self):
+        def boom(argv=None):
+            raise RuntimeError("compose blew up")
+
+        with patch.object(compose_packs, "_compose_main", boom):
+            with self.assertRaises(RuntimeError):
+                compose_packs.main([])
+        self.assertEqual(self._record_scope_state(), (False, False))
+
+    def test_main_returns_the_body_exit_code(self):
+        """The wrapper must be transparent to callers checking rc."""
+        with patch.object(compose_packs, "_compose_main", lambda argv=None: 3):
+            self.assertEqual(compose_packs.main([]), 3)
+
+    def test_probe_scope_reaches_the_module_the_fetch_path_calls(self):
+        """The scope must dedupe probes for real, not merely be open.
+
+        Asserting that some ``_PROBE_CACHE`` is a dict passes even when the
+        scope is opened on the wrong module object. Counting subprocess
+        calls is what distinguishes a working cache from an inert one: with
+        the scope bound correctly, four probe calls shell out once.
+        """
+        calls = []
+
+        def fake_run(*args, **kwargs):
+            calls.append(args)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        def body(argv=None):
+            for _ in range(4):
+                source_fetch.auth.gh_cli_authenticated()
+            return 0
+
+        with patch.object(source_fetch.auth.subprocess, "run", fake_run):
+            with patch.object(compose_packs, "_compose_main", body):
+                compose_packs.main([])
+        self.assertEqual(
+            len(calls), 1,
+            "gh probe shelled out once per call, so the probe scope is not "
+            "bound to the auth module that source_fetch uses",
+        )
+
+    def test_the_two_auth_module_objects_are_still_distinct(self):
+        """Pins the hazard this wiring has to survive.
+
+        If a future import cleanup unifies the two paths, this test fails
+        and the reader is pointed at the wiring above rather than being left
+        to rediscover why it reaches auth through ``source_fetch``.
+        """
+        from packs import auth as compose_side  # noqa: PLC0415
+        self.assertIsNot(
+            compose_side, source_fetch.auth,
+            "packs.auth and scripts.packs.auth unified; the probe-scope "
+            "wiring in compose_packs.main can now be simplified",
+        )
+
+    def test_main_forwards_argv_to_the_body(self):
+        captured = {}
+
+        def fake_body(argv=None):
+            captured["argv"] = argv
+            return 0
+
+        with patch.object(compose_packs, "_compose_main", fake_body):
+            compose_packs.main(["--root", "."])
+        self.assertEqual(captured["argv"], ["--root", "."])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -61,6 +61,88 @@ class TestGithubTokenAvailable(unittest.TestCase):
         self.assertFalse(auth.github_token_available())
 
 
+class TestProbeCaching(unittest.TestCase):
+    """A probe answers once per run, not once per pack.
+
+    Before this, a five-pack consumer re-ran `gh auth status` for every
+    pack that walked the auth chain, which was about 1.8 s of a 7 s
+    bootstrap spent re-asking a question whose answer cannot change while
+    the run is in flight.
+    """
+
+    @patch("subprocess.run")
+    def test_no_caching_without_an_open_scope(self, run):
+        """The default must stay uncached.
+
+        Module state that is live by default would outlive the run that
+        wanted it and would leak one test's probe result into the next.
+        """
+        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        auth.gh_cli_authenticated()
+        auth.gh_cli_authenticated()
+        self.assertEqual(run.call_count, 2)
+
+    @patch("subprocess.run")
+    def test_gh_probe_shells_out_once_inside_a_scope(self, run):
+        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with auth.probe_cache():
+            for _ in range(4):
+                self.assertTrue(auth.gh_cli_authenticated())
+        self.assertEqual(run.call_count, 1)
+
+    @patch("subprocess.run")
+    def test_negative_result_is_cached_as_well(self, run):
+        run.return_value = MagicMock(returncode=1, stdout="", stderr="")
+        with auth.probe_cache():
+            self.assertFalse(auth.ssh_agent_available())
+            self.assertFalse(auth.ssh_agent_available())
+        self.assertEqual(run.call_count, 1)
+
+    @patch("subprocess.run")
+    def test_missing_binary_is_cached_as_well(self, run):
+        run.side_effect = FileNotFoundError("gh not found")
+        with auth.probe_cache():
+            self.assertFalse(auth.gh_cli_authenticated())
+            self.assertFalse(auth.gh_cli_authenticated())
+        self.assertEqual(run.call_count, 1)
+
+    @patch("subprocess.run")
+    def test_the_two_probes_do_not_share_a_cache_entry(self, run):
+        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with auth.probe_cache():
+            auth.ssh_agent_available()
+            auth.gh_cli_authenticated()
+        self.assertEqual(run.call_count, 2)
+
+    @patch("subprocess.run")
+    def test_leaving_the_scope_drops_the_cache(self, run):
+        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with auth.probe_cache():
+            auth.gh_cli_authenticated()
+        with auth.probe_cache():
+            auth.gh_cli_authenticated()
+        self.assertEqual(run.call_count, 2)
+
+    @patch("subprocess.run")
+    def test_an_exception_still_restores_the_previous_scope(self, run):
+        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        with auth.probe_cache():
+            auth.gh_cli_authenticated()
+            with self.assertRaises(RuntimeError):
+                with auth.probe_cache():
+                    raise RuntimeError("boom")
+            # The outer scope's answer survived the inner scope's unwind.
+            auth.gh_cli_authenticated()
+        self.assertEqual(run.call_count, 1)
+
+    def test_token_probe_stays_uncached(self):
+        """An env read costs nothing, so caching would only add staleness."""
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_abc123"}):
+            self.assertTrue(auth.github_token_available())
+        with patch.dict(os.environ, {"GITHUB_TOKEN": ""}):
+            self.assertFalse(auth.github_token_available())
+
+
 class TestResolveRefWithAuthChain(unittest.TestCase):
     @patch("subprocess.run")
     @patch("scripts.packs.auth.ssh_agent_available", return_value=True)

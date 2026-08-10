@@ -4,7 +4,10 @@ Phase 3 replaces the Phase 2 stub with the full
 validate->resolve->compare->cache->fetch pipeline:
 
 1. ``reject_credential_url`` (parse-time, no network).
-2. ``resolve_ref_with_auth_chain`` (one network call) -> resolved sha.
+2. ``_resolve_ref_cached`` -> resolved sha. A miss calls
+   ``resolve_ref_with_auth_chain`` once, which itself tries each
+   available auth method until one succeeds; a hit inside an open
+   cache scope makes no network call.
 3. Compare the resolved sha against the recorded pack-lock commit;
    under ``update_policy=locked`` drift raises ``PackLockDriftError``.
 4. Cache lookup at ``(canonical_id_or_url_hash, resolved_commit)``;
@@ -14,6 +17,7 @@ validate->resolve->compare->cache->fetch pipeline:
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import pathlib
@@ -337,6 +341,75 @@ def _archive_root(cache_dir: pathlib.Path) -> pathlib.Path:
     return cache_dir
 
 
+# A compose run fetches several packs, and packs commonly share a source.
+# The maintainer's own consumers pin `profile`, `paper-workflow`, and
+# `acad-skills` to the same repository at the same ref, so a five-pack run
+# asked the remote to resolve one identical cache key three times. The
+# archive cache already deduplicated the clone, keyed on the resolved
+# commit, but the resolve itself ran once per pack because it happens
+# before the key is known.
+#
+# Caching it also removes a latent inconsistency. Without the cache, two
+# packs sharing a cache key could resolve to different commits if the
+# remote moved between their two `ls-remote` calls, and the run would
+# record a lock whose entries disagree about what `main` meant. One resolve
+# per (url, ref, explicit_auth) gives every pack on that key a consistent
+# snapshot for the run.
+#
+# Only successful resolves are cached. A failure re-walks the auth chain so
+# its diagnostics stay exactly as informative as before.
+#
+# The cache is off unless a caller opens a scope. Module-level state that is
+# live by default would outlast the run that wanted it: a long-lived process
+# such as the CLI running verify and then compose would reuse one resolve
+# across both operations, and any test calling ``fetch_pack`` twice with the
+# same fixture URL would silently receive the first test's commit.
+_REF_RESOLUTION_CACHE: dict[tuple, tuple] | None = None
+
+
+@contextlib.contextmanager
+def ref_resolution_cache():
+    """Resolve each ``(url, ref, explicit_auth)`` key once per block.
+
+    The key includes the explicit auth method because a caller that pins one
+    must be honored rather than served another method's result. Two packs on
+    the same URL and ref but different explicit auth therefore still resolve
+    independently, and the snapshot guarantee below applies per key rather
+    than per ref.
+
+    Nesting restores the enclosing scope's cache on exit, so a caller that
+    opens a scope inside another caller's scope cannot clear it.
+    """
+    global _REF_RESOLUTION_CACHE
+    previous = _REF_RESOLUTION_CACHE
+    _REF_RESOLUTION_CACHE = {}
+    try:
+        yield
+    finally:
+        _REF_RESOLUTION_CACHE = previous
+
+
+def _resolve_ref_cached(
+    url: str,
+    ref: str,
+    explicit_auth: str | None,
+) -> tuple:
+    """Resolve ``(url, ref, explicit_auth)`` once per open cache scope."""
+    if _REF_RESOLUTION_CACHE is None:
+        return auth.resolve_ref_with_auth_chain(
+            url, ref, explicit_method=explicit_auth,
+        )
+    key = (url, ref, explicit_auth)
+    hit = _REF_RESOLUTION_CACHE.get(key)
+    if hit is not None:
+        return hit
+    resolved = auth.resolve_ref_with_auth_chain(
+        url, ref, explicit_method=explicit_auth,
+    )
+    _REF_RESOLUTION_CACHE[key] = resolved
+    return resolved
+
+
 def load_cached_archive(
     url: str,
     recorded_commit: str,
@@ -396,8 +469,12 @@ def fetch_pack(
     Ordering (Codex Round 1 M5):
 
     1. Validate URL via :func:`auth.reject_credential_url` (no network).
-    2. Resolve ref to commit sha via
-       :func:`auth.resolve_ref_with_auth_chain` (one network call).
+    2. Resolve the cache key via :func:`_resolve_ref_cached`. Outside a
+       cache scope, and on a miss inside one, this calls
+       :func:`auth.resolve_ref_with_auth_chain` once; that call walks
+       the auth chain and issues one ``ls-remote`` per attempted
+       method, so a miss is one or more network calls. A hit makes
+       none.
     3. Compare the resolved sha against ``pack_lock_recorded_commit``;
        under ``policy="locked"`` drift raises :class:`PackLockDriftError`.
        Under ``"auto"`` / ``"prompt"`` the compose layer decides whether
@@ -418,8 +495,8 @@ def fetch_pack(
     auth.reject_credential_url(url, source_layer="source_fetch")
 
     # 2. Resolve ref -> commit sha.
-    resolved_commit, _resolve_method = auth.resolve_ref_with_auth_chain(
-        url, ref, explicit_method=explicit_auth,
+    resolved_commit, _resolve_method = _resolve_ref_cached(
+        url, ref, explicit_auth,
     )
 
     # 3. Compare against pack-lock recorded commit.
@@ -492,6 +569,21 @@ def fetch_pack(
     shutil.move(str(archive.archive_dir), str(cache_dir))
     sha = _compute_dir_sha256(cache_dir)
     (cache_dir / ".dir-sha256").write_text(sha)
+
+    # The clone is authoritative once it lands: the ref may have moved
+    # between ls-remote and clone, in which case the block above already
+    # re-keyed the cache slot to the post-clone commit. Promote that commit
+    # into the run cache too, or the next pack sharing this cache key is
+    # handed the stale pre-clone SHA, misses the slot that was just written
+    # under the post-clone SHA, and clones the moving ref a second time.
+    # Leaving the pre-clone value would also break the consistent-snapshot
+    # property this cache exists to provide: if the mutable ref moves again,
+    # the run ends holding two commits for one cache key.
+    if _REF_RESOLUTION_CACHE is not None:
+        _REF_RESOLUTION_CACHE[(url, ref, explicit_auth)] = (
+            resolved_commit,
+            archive.method,
+        )
 
     return PackArchive(
         url=url,

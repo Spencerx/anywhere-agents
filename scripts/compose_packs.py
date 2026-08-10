@@ -1069,6 +1069,31 @@ def _bundled_pack_def(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run one compose, with auth probes and ref resolutions deduplicated.
+
+    Both caches are module globals that stay disabled until a scope opens
+    them, and this call is the scope. A run is the unit over which an answer
+    is stable: `gh auth status` cannot change mid-run, and resolving one
+    ``(url, ref, explicit_auth)`` key twice within a run is the redundancy
+    this scope removes. Scoping it here also makes a run a consistent
+    snapshot per cache key, since two packs sharing a key can no longer
+    resolve to different commits because the remote moved between their
+    two `ls-remote` calls.
+    """
+    # Both scopes must be opened on the module objects the fetch path
+    # actually calls. ``compose_packs`` imports ``packs.auth`` while
+    # ``packs.source_fetch`` imports ``scripts.packs.auth``; the note above
+    # the import block records that these are two distinct module objects
+    # with independent globals. Opening the probe scope on this module's
+    # ``auth`` left the fetch path's cache at ``None``, so the probe
+    # deduplication silently did nothing. Reaching it through
+    # ``source_fetch.auth`` binds the scope to the object that
+    # ``resolve_ref_with_auth_chain`` and ``fetch_with_auth_chain`` read.
+    with source_fetch.ref_resolution_cache(), source_fetch.auth.probe_cache():
+        return _compose_main(argv)
+
+
+def _compose_main(argv: list[str] | None = None) -> int:
     # v0.5.2: ``compose_packs.py uninstall <name>`` is a sibling mode used
     # by ``anywhere-agents pack remove`` to drive the new single-pack
     # uninstall path. Keep the dispatch out of argparse so the existing

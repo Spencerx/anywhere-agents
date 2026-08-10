@@ -634,5 +634,181 @@ class TestPackArchiveShape(unittest.TestCase):
             archive.url = "other"  # type: ignore[misc]
 
 
+class TestRefResolutionCache(unittest.TestCase):
+    """One successful resolve per (url, ref, explicit_auth) in an open scope.
+
+    Packs commonly share a source: the maintainer's consumers pin
+    ``profile``, ``paper-workflow``, and ``acad-skills`` to the same
+    repository at the same ref, so a five-pack run asked the remote to
+    resolve one identical pair three times. The archive cache already
+    deduplicated the clone, but it is keyed on the resolved commit, which
+    is not known until after the resolve.
+    """
+
+    @patch("scripts.packs.auth.resolve_ref_with_auth_chain",
+           side_effect=[("ab" * 20, "gh"), ("cd" * 20, "gh")])
+    def test_no_caching_without_an_open_scope(self, resolve):
+        """The default must stay uncached.
+
+        Module state that is live by default would outlive the run that
+        wanted it, and any test calling ``fetch_pack`` twice with a shared
+        fixture URL would silently receive the earlier test's commit.
+        """
+        first = source_fetch._resolve_ref_cached(
+            "https://github.com/x/y", "main", None)
+        second = source_fetch._resolve_ref_cached(
+            "https://github.com/x/y", "main", None)
+        self.assertNotEqual(first, second)
+        self.assertEqual(resolve.call_count, 2)
+
+    @patch("scripts.packs.auth.resolve_ref_with_auth_chain",
+           return_value=("ab" * 20, "gh"))
+    def test_repeat_url_ref_resolves_once_inside_a_scope(self, resolve):
+        with source_fetch.ref_resolution_cache():
+            first = source_fetch._resolve_ref_cached(
+                "https://github.com/yzhao062/agent-pack", "main", None)
+            for _ in range(2):
+                again = source_fetch._resolve_ref_cached(
+                    "https://github.com/yzhao062/agent-pack", "main", None)
+                self.assertEqual(again, first)
+        self.assertEqual(resolve.call_count, 1)
+
+    @patch("scripts.packs.auth.resolve_ref_with_auth_chain",
+           side_effect=[("ab" * 20, "gh"), ("cd" * 20, "gh")])
+    def test_distinct_refs_resolve_separately(self, resolve):
+        with source_fetch.ref_resolution_cache():
+            a = source_fetch._resolve_ref_cached(
+                "https://github.com/x/y", "main", None)
+            b = source_fetch._resolve_ref_cached(
+                "https://github.com/x/y", "v1.0", None)
+        self.assertNotEqual(a, b)
+        self.assertEqual(resolve.call_count, 2)
+
+    @patch("scripts.packs.auth.resolve_ref_with_auth_chain",
+           side_effect=[("ab" * 20, "gh"), ("cd" * 20, "gh")])
+    def test_distinct_urls_resolve_separately(self, resolve):
+        with source_fetch.ref_resolution_cache():
+            source_fetch._resolve_ref_cached(
+                "https://github.com/x/y", "main", None)
+            source_fetch._resolve_ref_cached(
+                "https://github.com/x/z", "main", None)
+        self.assertEqual(resolve.call_count, 2)
+
+    @patch("scripts.packs.auth.resolve_ref_with_auth_chain",
+           side_effect=[("ab" * 20, "ssh"), ("ab" * 20, "gh")])
+    def test_explicit_auth_method_is_part_of_the_key(self, resolve):
+        """A caller pinning a method must not be served another one's result."""
+        with source_fetch.ref_resolution_cache():
+            ssh_result = source_fetch._resolve_ref_cached(
+                "https://github.com/x/y", "main", "ssh")
+            gh_result = source_fetch._resolve_ref_cached(
+                "https://github.com/x/y", "main", "gh")
+        self.assertEqual(ssh_result[1], "ssh")
+        self.assertEqual(gh_result[1], "gh")
+        self.assertEqual(resolve.call_count, 2)
+
+    def test_failures_are_not_cached(self):
+        """A failure re-walks the chain so its diagnostics stay complete."""
+        calls = []
+
+        def boom(url, ref, explicit_method=None):
+            calls.append((url, ref))
+            raise RuntimeError("auth chain exhausted")
+
+        with patch("scripts.packs.auth.resolve_ref_with_auth_chain", boom):
+            with source_fetch.ref_resolution_cache():
+                for _ in range(2):
+                    with self.assertRaises(RuntimeError):
+                        source_fetch._resolve_ref_cached(
+                            "https://github.com/x/y", "main", None)
+        self.assertEqual(len(calls), 2)
+
+    @patch("scripts.packs.auth.resolve_ref_with_auth_chain",
+           side_effect=[("ab" * 20, "gh"), ("cd" * 20, "gh")])
+    def test_leaving_the_scope_drops_the_cache(self, resolve):
+        with source_fetch.ref_resolution_cache():
+            first = source_fetch._resolve_ref_cached(
+                "https://github.com/x/y", "main", None)
+        with source_fetch.ref_resolution_cache():
+            second = source_fetch._resolve_ref_cached(
+                "https://github.com/x/y", "main", None)
+        self.assertNotEqual(first, second)
+        self.assertEqual(resolve.call_count, 2)
+
+    @patch("scripts.packs.auth.resolve_ref_with_auth_chain",
+           return_value=("ab" * 20, "gh"))
+    def test_an_exception_still_restores_the_previous_scope(self, resolve):
+        with source_fetch.ref_resolution_cache():
+            source_fetch._resolve_ref_cached(
+                "https://github.com/x/y", "main", None)
+            with self.assertRaises(RuntimeError):
+                with source_fetch.ref_resolution_cache():
+                    raise RuntimeError("boom")
+            # The outer scope's entry survived the inner scope's unwind.
+            source_fetch._resolve_ref_cached(
+                "https://github.com/x/y", "main", None)
+        self.assertEqual(resolve.call_count, 1)
+
+    @patch("scripts.packs.auth.resolve_ref_with_auth_chain",
+           return_value=("aa" * 20, "gh"))
+    def test_post_clone_commit_replaces_the_cached_pre_clone_sha(self, resolve):
+        """A ref that moves between ls-remote and clone must not split the run.
+
+        `fetch_pack` already re-keys the cache slot to the post-clone commit
+        when the ref moved. If the run cache keeps the pre-clone SHA, the
+        next pack on the same cache key is handed a commit that no longer matches
+        the slot just written, so it clones the moving ref again and the run
+        ends holding two different commits for one ref.
+        """
+        url = "https://github.com/x/y"
+        post = "bb" * 20
+        second = "cc" * 20
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            with patch("scripts.packs.auth.fetch_with_auth_chain") as fetch:
+                fetch.side_effect = [
+                    _make_archive(root, url, "main", post),
+                    _make_archive(root, url, "main", second),
+                ]
+                with source_fetch.ref_resolution_cache():
+                    first = source_fetch.fetch_pack(
+                        url, "main", cache_root=root / "cache")
+                    again = source_fetch.fetch_pack(
+                        url, "main", cache_root=root / "cache")
+        self.assertEqual(first.resolved_commit, post)
+        self.assertEqual(
+            again.resolved_commit, post,
+            "second pack on the same cache key got a different commit; the run is "
+            "no longer a consistent snapshot",
+        )
+        self.assertEqual(resolve.call_count, 1)
+        self.assertEqual(
+            fetch.call_count, 1,
+            "the moving ref was cloned twice; the cached pre-clone SHA "
+            "missed the slot written under the post-clone SHA",
+        )
+
+    @patch("scripts.packs.auth.resolve_ref_with_auth_chain",
+           return_value=("ab" * 20, "gh"))
+    def test_fetch_pack_routes_through_the_cache(self, resolve):
+        """The wiring, not just the helper: two fetches, one resolve.
+
+        Guards against a future edit that calls the auth chain directly
+        again and silently restores the per-pack resolve.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_root = pathlib.Path(tmp) / "cache"
+            with patch("scripts.packs.auth.fetch_with_auth_chain") as fetch:
+                fetch.side_effect = RuntimeError("stop after resolve")
+                with source_fetch.ref_resolution_cache():
+                    for _ in range(2):
+                        with self.assertRaises(RuntimeError):
+                            source_fetch.fetch_pack(
+                                "https://github.com/x/y", "main",
+                                cache_root=cache_root,
+                            )
+        self.assertEqual(resolve.call_count, 1)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
