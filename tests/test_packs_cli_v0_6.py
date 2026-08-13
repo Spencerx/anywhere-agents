@@ -44,6 +44,13 @@ sys.path.insert(0, str(ROOT / "scripts"))
 # composer modules) resolves consistently with ``from packs import X``.
 sys.path.insert(0, str(ROOT))
 
+# The ref the bundled manifest pins agent-style at. Read rather than
+# retyped: these fixtures have to match the manifest, and a literal here
+# turns any pin bump into unrelated test failures.
+from bundled_manifest_ref import agent_style_ref
+
+BUNDLED_AGENT_STYLE_REF = agent_style_ref()
+
 
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1145,9 +1152,12 @@ class TestSmoke28MinimalAutoReconciledFixture(unittest.TestCase):
 
     Mirrors the mocking pattern of :class:`TestSkipPreservesLockOnSameRefSourcePathDrift`:
     inline-source pack with both old and new from-paths in a fake
-    archive at the same ``requested_ref`` (so only ``source_path``
-    advances; this isolates the refinement classifier without bringing
-    a ref bump into play).
+    archive. Subclasses vary ``stale_project_ref`` alone, so the same
+    convergence method covers every bundled-default ref aa auto-assigned
+    to this minimal default row; the fixture seeds that ref and requires
+    the canonical apply path to advance it to ``bundled_ref``. A ref that
+    came from the user, even in a minimal row, is a deliberate pin and
+    stays outside this set.
     """
 
     pack_name = "agent-style"
@@ -1157,7 +1167,7 @@ class TestSmoke28MinimalAutoReconciledFixture(unittest.TestCase):
     # stale ``stale_project_ref`` in both ``agent-config.yaml`` and the
     # lock; the canonical apply path must converge them to
     # ``bundled_ref``.
-    bundled_ref = "v0.3.6"
+    bundled_ref = BUNDLED_AGENT_STYLE_REF
     stale_project_ref = "v0.3.2"
     bundled_policy = "auto"
     # Synthetic commits that distinguish the stale-lock state from the
@@ -1427,12 +1437,13 @@ class TestSmoke28MinimalAutoReconciledFixture(unittest.TestCase):
           5. ``agent-config.yaml`` does not silently grow synthetic
              ``passive`` / ``active`` shape keys.
 
-        This is the random-project shape: project + lock seeded at
-        ``v0.3.2`` while the bundled default has flipped to
-        ``v0.3.5``. Pre-Round 2, ``_has_explicit_default_override``
+        This is the random-project shape: project and lock seeded at
+        ``stale_project_ref`` while the bundled default has moved on to
+        ``bundled_ref``. Pre-Round 2, ``_has_explicit_default_override``
         returned True for any ref deviation, leaving the stale ref
         pinned indefinitely; this test is the regression guard for
-        the rewrite-helper fix.
+        the rewrite-helper fix, and each subclass points it at a
+        different ref aa has written.
         """
         # Build a STALE-shape minimal entry: ref deviates from bundled
         # but no passive / active / update_policy keys are present.
@@ -1497,6 +1508,14 @@ class TestSmoke28MinimalAutoReconciledFixture(unittest.TestCase):
         self.assertIn(
             "NEW compact content", agents_md,
             "AGENTS.md must re-render from the NEW compact source",
+        )
+        # The managed marker embeds the ref that produced the block, so it
+        # is the one consumer byte a pin bump always rewrites even when the
+        # rule body and its sha256 are unchanged. Asserted here so that
+        # claim is checked rather than described.
+        self.assertIn(
+            f"version={self.bundled_ref}", agents_md,
+            "the managed marker must report the ref that produced the block",
         )
         self.assertNotIn(
             "OLD full-body content", agents_md,
@@ -1611,9 +1630,8 @@ class TestSmoke28MinimalAutoReconciledFixture(unittest.TestCase):
 
         Probe shape: ``agent-style v0.2.0`` with no shape / policy keys.
         Even though it matches "minimal default-pack name + URL",
-        ``v0.2.0`` is NOT in the allow-list (only ``v0.3.2`` is the
-        known aa-reconciliation residue), so the helper must leave it
-        alone.
+        ``v0.2.0`` was never a bundled default, so it is not in the
+        migratable ledger and the helper must leave it alone.
         """
         pinned_ref = "v0.2.0"
         agent_config_text = (
@@ -1747,6 +1765,105 @@ class TestLoadProjectObservationsHostAware(unittest.TestCase):
         # would have dropped it. agent-style auto-seed still applies.
         self.assertIn("aa-core-skills", names)
         self.assertIn("agent-style", names)
+
+
+class TestAutoReconciledResidueSetStaysComplete(unittest.TestCase):
+    """The residue set must list the ref that is currently bundled.
+
+    Reconciliation assigns the then-current bundled ref into a minimal row,
+    so every ref that has been the default becomes residue the moment the
+    default moves past it. Listing each ref while it is current is what makes
+    the set complete at the next bump, without anyone having to remember the
+    release history at that moment.
+
+    This test exists because the list was found incomplete twice in
+    consecutive review rounds of one pin bump: first missing ``v0.3.6``, then
+    ``v0.3.5``. Both stranded the consumers aa had healed during those
+    release lines.
+
+    Listing the current ref is a no-op at runtime. The rewrite is guarded by
+    ``entry_ref != bundled_ref``, so a row already at the bundled ref is
+    skipped before any rewrite is considered.
+    """
+
+    def test_current_bundled_ref_is_listed_as_migratable(self) -> None:
+        sys.path.insert(0, str(ROOT / "packages" / "pypi"))
+        from anywhere_agents import cli
+
+        listed = cli._AUTO_RECONCILED_DEFAULT_REF_REWRITES.get("agent-style", set())
+        self.assertIn(
+            BUNDLED_AGENT_STYLE_REF, listed,
+            "bootstrap/packs.yaml pins agent-style at "
+            f"{BUNDLED_AGENT_STYLE_REF!r}, which is not in "
+            "_AUTO_RECONCILED_DEFAULT_REF_REWRITES. Add it now: once the "
+            "bundled default moves past this ref, every project aa "
+            "reconciled while it was current carries a minimal row at it, "
+            "and an unlisted ref reads as a deliberate pin that never "
+            "migrates.",
+        )
+
+    def test_bundled_ref_ledger_matches_migratable_set(self) -> None:
+        """The migratable set is an append-only bundled-ref ledger.
+
+        Exact equality, not membership. A containment check per ref lets a
+        future bump *replace* the current entry instead of appending: swapping
+        ``v0.4.1`` for ``v0.5.0`` satisfies both a "current ref is listed"
+        check and a "these three historical refs are listed" check, while
+        silently stranding the ``v0.4.1`` cohort. That was measured, not
+        imagined; the first version of this guard passed under exactly that
+        substitution.
+
+        Pairing equality here with the current-ref assertion above forces a
+        future bump to append the new ref to both the production set and this
+        ledger.
+
+        The historical values were recovered with:
+            git log -p --all -- bootstrap/packs.yaml bootstrap/rule-packs.yaml
+              | grep -E '^\\+.*ref: v[0-9]' | sort -u
+        """
+        sys.path.insert(0, str(ROOT / "packages" / "pypi"))
+        from anywhere_agents import cli
+
+        listed = cli._AUTO_RECONCILED_DEFAULT_REF_REWRITES.get(
+            "agent-style", set()
+        )
+        expected_through_v041 = {
+            "v0.3.2", "v0.3.5", "v0.3.6", "v0.4.1",
+        }
+        self.assertEqual(
+            listed,
+            expected_through_v041,
+            "append each new bundled ref to this ledger and the production "
+            "set; do not replace an earlier ref",
+        )
+
+
+class TestSmoke28MinimalAutoReconciledFromV035(
+    TestSmoke28MinimalAutoReconciledFixture
+):
+    """Converge a minimal ref that aa v0.6.0 could write itself."""
+
+    stale_project_ref = "v0.3.5"
+
+
+class TestSmoke28MinimalAutoReconciledFromV036(
+    TestSmoke28MinimalAutoReconciledFixture
+):
+    """The same convergence, from the other ref aa has auto-written.
+
+    ``_AUTO_RECONCILED_DEFAULT_REF_REWRITES`` listed only ``v0.3.2`` while
+    ``v0.3.6`` was the bundled default for an entire release line, so every
+    project aa reconciled during that line carries a minimal ``v0.3.6`` row.
+    Bumping the bundled pin without listing it stranded exactly those
+    consumers: the row failed the known-residue check,
+    ``_has_explicit_default_override`` read the ref difference as a
+    deliberate pin, and the fetch, marker rewrite, and lock refresh never
+    ran. The parent class covers ``v0.3.2``; both stay covered, because a
+    fix that swapped one residue ref for the other would strand the other
+    half of the installed base.
+    """
+
+    stale_project_ref = "v0.3.6"
 
 
 if __name__ == "__main__":

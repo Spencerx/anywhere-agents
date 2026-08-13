@@ -21,6 +21,13 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# The ref the bundled manifest pins agent-style at. Read rather than
+# retyped: these fixtures have to match the manifest, and a literal here
+# turns any pin bump into unrelated test failures.
+from bundled_manifest_ref import agent_style_ref
+
+BUNDLED_AGENT_STYLE_REF = agent_style_ref()
 sys.path.insert(0, str(ROOT / "scripts"))
 
 
@@ -278,7 +285,7 @@ class CLIBannerVerifyTests(unittest.TestCase):
                         "name": "agent-style",
                         "source": {
                             "repo": "https://github.com/yzhao062/agent-style",
-                            "ref": "v0.3.6",
+                            "ref": BUNDLED_AGENT_STYLE_REF,
                         },
                         "passive": [
                             {
@@ -318,7 +325,7 @@ class CLIBannerVerifyTests(unittest.TestCase):
                 "packs": {
                     "agent-style": {
                         "source_url": "https://github.com/yzhao062/agent-style",
-                        "requested_ref": "v0.3.6",
+                        "requested_ref": BUNDLED_AGENT_STYLE_REF,
                         "resolved_commit": "ef" * 20,
                         "files": [
                             {

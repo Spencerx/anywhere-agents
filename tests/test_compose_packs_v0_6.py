@@ -31,6 +31,13 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# The ref the bundled manifest pins agent-style at. Read rather than
+# retyped: these fixtures have to match the manifest, and a literal here
+# turns any pin bump into unrelated test failures.
+from bundled_manifest_ref import agent_style_ref
+
+BUNDLED_AGENT_STYLE_REF = agent_style_ref()
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import compose_packs  # noqa: E402
@@ -497,12 +504,12 @@ class TestBcGuardDistinguishesMinimalFromExplicitPin(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
         # The bundled manifest declares ``agent-style`` with
-        # ``ref: v0.3.6`` and ``update_policy: auto`` (per
-        # bootstrap/packs.yaml in this repo). All sub-cases below are
-        # written against that bundled default.
+        # ``update_policy: auto``; its ref is read from
+        # bootstrap/packs.yaml rather than repeated here. All sub-cases
+        # below are written against that bundled default.
         self.pack_name = "agent-style"
         self.bundled_url = "https://github.com/yzhao062/agent-style"
-        self.bundled_ref = "v0.3.6"
+        self.bundled_ref = BUNDLED_AGENT_STYLE_REF
         # ``_has_explicit_default_override`` ignores ``row`` when the
         # user-level identity is bundled; provide a stand-in row that
         # passes that early check so the function falls through to the

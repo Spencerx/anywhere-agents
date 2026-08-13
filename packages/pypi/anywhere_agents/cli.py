@@ -1689,16 +1689,33 @@ def _default_v2_seed_for_host(host: str) -> tuple[str, ...]:
 # ref to the bundled default ONLY when the consumer-side ref is a known
 # residue from a prior aa auto-reconciliation pass. Any other minimal
 # default-name ref is a deliberate user pin per the BC-guard contract at
-# pack-architecture.md:678 and must NOT be rewritten. This map enumerates
-# the historical aa-written refs; extend only when a future aa release
-# auto-writes a new minimal-shape default entry that needs forward
-# migration.
+# pack-architecture.md:678 and must NOT be rewritten. This map is the ledger
+# of bundled-default refs that aa itself auto-assigned to a minimal default
+# row. It includes the ref that is currently bundled, not only past ones, so
+# that the entry is already present when a later bump moves past it.
 _AUTO_RECONCILED_DEFAULT_REF_REWRITES: dict[str, set[str]] = {
     # v0.5.x aa reconciliation wrote this minimal agent-style row into
     # consumer projects before the bundled default moved to v0.3.5.
     # See pack-architecture.md "Reconciliation-aware BC guard refinement"
     # section and the random-project reproduction (`v0.3.2` stale shape).
-    "agent-style": {"v0.3.2"},
+    # Every ref that has ever been the bundled default can appear as
+    # aa-written residue, because reconciliation assigns the then-current
+    # bundled ref into the minimal row. `v0.3.5` (aa v0.6.0) and `v0.3.6`
+    # (aa v0.7.5) are both that. Omitting one silently strands the consumers
+    # healed during its release line: the aa-written row fails the
+    # known-residue check, `_has_explicit_default_override` reads the ref
+    # difference as a deliberate pin, and those projects never reach the
+    # fetch, marker rewrite, or lock refresh.
+    #
+    # The invariant that keeps this list complete is tested rather than
+    # remembered: the current bundled ref must itself be listed, so each ref
+    # is added while it is the default and is already here by the time a
+    # later bump moves away from it. This list was incomplete twice before
+    # that test existed.
+    # v0.4.1 is listed while it *is* the default. Advancing a row to the ref
+    # it already holds is a no-op: the rewrite is guarded by
+    # `entry_ref != bundled_ref`, which short-circuits first.
+    "agent-style": {"v0.3.2", "v0.3.5", "v0.3.6", "v0.4.1"},
 }
 _BUNDLED_IDENTITY_URL = "bundled:aa"
 _BUNDLED_IDENTITY_REF = "bundled"

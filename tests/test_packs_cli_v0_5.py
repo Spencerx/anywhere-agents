@@ -27,6 +27,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "packages" / "pypi"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+# The ref the bundled manifest pins agent-style at. Read rather than
+# retyped: these fixtures have to match the manifest, and a literal here
+# turns any pin bump into unrelated test failures.
+from bundled_manifest_ref import agent_style_ref
+
+BUNDLED_AGENT_STYLE_REF = agent_style_ref()
+
 
 def _build_archive(archive_dir: pathlib.Path) -> object:
     """Build a PackArchive pointing at the given directory."""
@@ -1111,7 +1118,7 @@ class PackVerifyTests(unittest.TestCase):
             project = pathlib.Path(d) / "project"
             project.mkdir()
             # Lock entries shaped to match the post-v0.5.7 wheel-bundled
-            # identity (v0.3.6 + compact path) so the classifier sees a
+            # identity (the bundled ref + compact path) so the classifier sees a
             # consistent (project=L=defaults) tuple and emits "deployed".
             agent_style_outputs = ["AGENTS.md"]
             aa_core_outputs = [".claude/skills/aa-core-skills/SKILL.md"]
@@ -1121,7 +1128,7 @@ class PackVerifyTests(unittest.TestCase):
                 "packs": {
                     "agent-style": self._lock_entry(
                         "https://github.com/yzhao062/agent-style",
-                        "v0.3.6",
+                        BUNDLED_AGENT_STYLE_REF,
                         agent_style_outputs,
                     ),
                     "aa-core-skills": self._lock_entry("", "", aa_core_outputs),
@@ -1181,7 +1188,7 @@ class PackVerifyTests(unittest.TestCase):
                 "packs": {
                     "agent-style": self._lock_entry(
                         "https://github.com/yzhao062/agent-style",
-                        "v0.3.6",
+                        BUNDLED_AGENT_STYLE_REF,
                         ["AGENTS.md"],
                     ),
                     "aa-core-skills": self._lock_entry(
@@ -1228,7 +1235,7 @@ class PackVerifyTests(unittest.TestCase):
                     "name": "agent-style",
                     "source": {
                         "url": "https://github.com/yzhao062/agent-style",
-                        "ref": "v0.3.6",
+                        "ref": BUNDLED_AGENT_STYLE_REF,
                     },
                 },
             ])
@@ -1236,7 +1243,7 @@ class PackVerifyTests(unittest.TestCase):
                 "packs": {
                     "agent-style": self._lock_entry(
                         "https://github.com/yzhao062/agent-style",
-                        "v0.3.6",
+                        BUNDLED_AGENT_STYLE_REF,
                         ["AGENTS.md"],
                     ),
                     "aa-core-skills": self._lock_entry(
@@ -1383,7 +1390,7 @@ class PackVerifyTests(unittest.TestCase):
                 "packs": {
                     "agent-style": self._lock_entry(
                         "https://github.com/yzhao062/agent-style",
-                        "v0.3.6",
+                        BUNDLED_AGENT_STYLE_REF,
                         ["AGENTS.md"],
                     ),
                     "aa-core-skills": self._lock_entry(
