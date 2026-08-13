@@ -11,6 +11,19 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 _No unreleased changes queued._
 
+## [0.7.12] — 2026-08-13
+
+### Changed
+
+- **Bundled `agent-style` pin advanced to `v0.4.1`.** That release corrected the RULE-12 detector; its ruleset did not change. `docs/rule-pack-compact.md` is byte-identical across `v0.3.6`, `v0.4.0` and `v0.4.1`. For auto-managed consumers the rule body and its sha256 are unchanged. Known-residue refs and the managed `AGENTS.md` marker advance to `version=v0.4.1`, and lock and cache state refresh.
+- **The bundled manifest shipped in the wheel now matches `bootstrap/packs.yaml`.** Until this release the two disagreed after a pin bump on `main`. The bootstrap composer reads the sparse clone and saw `v0.4.1`. `pack verify` reads the wheel's own copy and still saw `v0.3.6`. The result was a hard `identity mismatch` and `rc=1` on a correctly-updated project. Releasing the bump is what aligns the two paths.
+
+### Fixed
+
+- **A pin bump no longer strands consumers aa itself reconciled.** `_AUTO_RECONCILED_DEFAULT_REF_REWRITES` listed only `v0.3.2`, while `v0.3.5` and `v0.3.6` were each the bundled default for a release line. Reconciliation assigns the then-current bundled ref into a minimal project row, so every project healed during those lines carries one. An unlisted ref failed the known-residue check, `_has_explicit_default_override` read the difference as a deliberate pin, and those projects never reached the fetch, marker rewrite or lock refresh. All three historical refs are now listed, each with a convergence regression over the shared smoke-28 fixture.
+- **The residue list is now kept complete by an invariant rather than by memory.** The currently bundled ref must itself be listed, so each ref is present before a later bump moves past it. Listing the current ref is a no-op, because the rewrite is guarded by `entry_ref != bundled_ref`. The ledger test asserts exact set equality rather than membership, since a membership pair is satisfied by substitution. An earlier version of that guard passed while `v0.4.1` was swapped for `v0.5.0`, dropping its cohort.
+- **Bumping the pin no longer fails seven tests that do not test the pin.** Nine literals across four files spelled the bundled ref by hand, one under a comment claiming it matched `bootstrap/packs.yaml` with nothing enforcing that. `tests/bundled_manifest_ref.py` reads it through the composer's own `parse_manifest`.
+
 ## [0.7.11] — 2026-08-10
 
 ### Changed
@@ -991,7 +1004,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.11...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.12...HEAD
+[0.7.12]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.11...v0.7.12
 [0.7.11]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.10...v0.7.11
 [0.7.10]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.9...v0.7.10
 [0.7.9]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.8...v0.7.9
