@@ -9,7 +9,19 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
-_No unreleased changes queued._
+### Fixed
+
+- **The writing-style guard was wired to no tool that could trigger it.** `user/settings.json` registered `guard.py` on `PreToolUse` for `Bash` and `PowerShell`. `check_writing_style` acts on `Write` / `Edit` / `MultiEdit` and nothing else. Every banned AI-tell word therefore passed through untouched in a real session, for the length of a release line. The suite covering the gate kept passing because it calls `guard.py` directly. A probe write carrying `pivotal` confirmed it: allowed before the matcher was added, denied after. Everything else about the feature was correct. The gate, its tests, its documentation and its escape hatch were all in place, and nothing connected them to a running agent.
+
+  A `Write|Edit|MultiEdit` matcher is now registered, and `tests/test_guard.py` asserts that every tool `guard.py` gates is selected by some matcher. That test probes the hook for a real decision per tool before it checks coverage, so it fails on the historical defect. A list of tool names copied out of `guard.py` would instead have agreed with itself. Both bootstrap scripts replace hook arrays wholesale during the user-settings merge, so consumers pick the matcher up on their next run.
+
+### Added
+
+- **Prose writes are scanned by `agent-style`'s mechanical detectors, as an advisory.** When the `agent-style` package is importable, `guard.py` runs six of its deterministic rules (RULE-05, 06, 12, B, D, I) over prose writes, reports what they find, and does not block the write. The files covered are the ones the banned-word guard already reads: `.md`, `.tex`, `.rst` and `.txt`. Until now the rule pack reached consumers as text absorbed into `AGENTS.md` while its checker reached nobody. The CLI is not on `PATH` inside an agent session, and the `style-review` skill has to be invoked by hand. This puts the engine in front of every prose write for the cost of an import.
+
+  These rules report rather than deny because they have no one-word substitution the way a banned AI-tell word does. RULE-12 fires on any sentence over thirty words. That is a mechanical fix while an agent drafts and a judgement call while a person types. A gate that blocked on it would be switched off within a day. Findings are capped at five plus a count of the remainder, since a wall of them is one the reader learns to skip. The pass runs only when the banned-word guard did not deny, so a blocked write still yields one message. It shares `AGENT_STYLE_HOOK` rather than adding an env var, and a missing or broken `agent_style` degrades silently, which is the default state in most repositories.
+
+  Two choices came out of measurement rather than out of the documentation. The findings travel in `hookSpecificOutput.additionalContext` and in `systemMessage`. Probing Claude Code 2.1.229 showed those reach the model and the user respectively. Writing to stderr and exiting 0, the shape the banner re-arm advisory uses, reached neither. RULE-G, which asks for title-case headings, is left out of the set. Over the 155 markdown files in `agent-config` it produced 1018 of 2561 findings, and a 15-hit random sample contained nothing worth acting on. It flags the sentence-case headings that corpus writes on purpose. It also flags lowercase project names such as `agent-config`, which cannot be title-cased at all. `style-review` still runs it, where a human asked for the full audit.
 
 ## [0.7.12] — 2026-08-13
 

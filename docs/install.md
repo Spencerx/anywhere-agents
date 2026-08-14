@@ -162,7 +162,7 @@ Bootstrap is idempotent and non-destructive — there is no system-wide install 
 
     | Env var | Disables |
     |---|---|
-    | `AGENT_STYLE_HOOK=off` | Writing-style guard only |
+    | `AGENT_STYLE_HOOK=off` | Writing-style guard and its agent-style advisory |
     | `AGENT_COMPOUND_CD_HOOK=off` | Compound-cd guard only |
     | `AGENT_CONFIG_GATES=off` | Legacy blanket: writing-style + session banner |
 

@@ -37,7 +37,7 @@
 
     | Env var (set in `~/.claude/settings.json` under `"env"`) | Disables |
     |---|---|
-    | `AGENT_STYLE_HOOK=off` | Writing-style guard only (banned AI-tell words on `.md` / `.tex` / `.rst` / `.txt` writes) |
+    | `AGENT_STYLE_HOOK=off` | Writing-style guard and its agent-style advisory (both scan `.md` / `.tex` / `.rst` / `.txt` writes) |
     | `AGENT_COMPOUND_CD_HOOK=off` | Compound-cd guard only (`cd <path> && <cmd>` Bash chains) |
     | `AGENT_CONFIG_GATES=off` | Legacy blanket: writing-style + session banner |
 
@@ -46,6 +46,17 @@
     **Destructive git / gh approval is NOT bypassable by any env.** No env var disables the `ask` prompt on `git commit`, `git push`, `git reset --hard`, `git merge`, `git rebase`, `gh pr merge`, `gh repo delete`, etc. Human approval is the contract; these guards have no agent-side reroute.
 
     Full removal: in a fork, remove the user-level section of `bootstrap/bootstrap.sh` / `bootstrap.ps1` that deploys `scripts/guard.py`. In a specific project only, remove the `hooks` entry from `~/.claude/settings.json` manually (bootstrap re-installs it on the next run from upstream).
+
+??? question "What is the `[agent-style]` line on some prose writes?"
+    An advisory, added in v0.7.13. When the [`agent-style`](https://github.com/yzhao062/agent-style) package is importable, prose writes are also scanned by six of its deterministic detectors. Those cover long sentences, casual em dashes, transition overuse, contractions in technical prose, clichés, and jargon. The findings go to both the agent and you, and this guard does not block the write:
+
+    ```text
+    [agent-style] 2 finding(s) in notes.md: RULE-12: sentence length 34 words (>30); RULE-D: transition word "Additionally" opens 3 paragraphs. Advisory only; this hook did not block the write.
+    ```
+
+    These rules report rather than deny because they have no one-word substitution the way a banned AI-tell word does. A gate that blocked on sentence length would be switched off within a day. The list is capped at five findings plus a count of the rest. Nothing happens when the package is absent, which is the default: `pip install agent-style` turns it on, and `AGENT_STYLE_HOOK=off` turns it back off along with the banned-word guard.
+
+    RULE-G, the title-case heading rule, is left out of this set on purpose. It fires on sentence-case headings that most repositories write deliberately, and it accounted for 40% of all findings when measured across `agent-config`. Run `style-review` when you want the full audit including that rule.
 
 ??? question "Why does the deny message say `Suggested rewrite:`?"
     v0.7.0 (Round 6 noise audit). When a guard denies a write (banned AI-tell word, compound-cd chain), it embeds a concrete `Suggested rewrite:` line inline so the agent can lift the reroute in one model turn instead of inferring it. Example:
