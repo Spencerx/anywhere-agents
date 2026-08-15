@@ -1037,13 +1037,17 @@ class PowerShellPythonProbeTests(unittest.TestCase):
 
     BOOTSTRAP_PS1 = ROOT / "bootstrap" / "bootstrap.ps1"
 
+    SENTINEL = "__ANYWHERE_AGENTS_PY3__"
+
     def test_python_probe_is_valid_python_and_exits_zero(self) -> None:
         import re
 
         text = self.BOOTSTRAP_PS1.read_text(encoding="utf-8")
-        # Find the probe command: & $PythonPath -c "import sys; ... SystemExit(...)"
+        # The probe is single-quoted in PowerShell so the embedded Python
+        # string literals can use double quotes:
+        #   & $PythonPath -c 'import sys; sys.stdout.write("...")'
         match = re.search(
-            r'-c\s+"([^"]*import sys[^"]*SystemExit[^"]*)"', text
+            r"-c\s+'([^']*import sys[^']*sys\.stdout\.write[^']*)'", text
         )
         self.assertIsNotNone(
             match, "bootstrap.ps1 must contain a Test-PythonRuns probe command"
@@ -1059,6 +1063,16 @@ class PowerShellPythonProbeTests(unittest.TestCase):
             0,
             f"PS1 python-probe expression {expr!r} must exit 0 on Python 3; "
             f"stderr={result.stderr!r}",
+        )
+        # Exit status alone is not the contract any more. A command that
+        # ignores its arguments and exits 0 passed the old probe while
+        # executing nothing, so the probe now requires the sentinel on
+        # stdout and the test has to pin that too.
+        self.assertEqual(
+            result.stdout.strip(),
+            self.SENTINEL,
+            f"PS1 python-probe expression {expr!r} must emit the sentinel "
+            f"on Python 3; stdout={result.stdout!r}",
         )
 
 
