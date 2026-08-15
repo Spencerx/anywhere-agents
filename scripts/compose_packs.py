@@ -72,6 +72,8 @@ from packs import transaction as txn_mod  # noqa: E402
 # update this tuple, the schema's host validator, and any host-aware
 # dispatch logic in lockstep.
 KNOWN_HOSTS = ("claude-code", "codex")
+_LIVE_ORPHAN_ALARM_COUNT = 3
+_LIVE_ORPHAN_ALARM_BYTES = 64 * 1024 * 1024
 
 
 class ComposeError(RuntimeError):
@@ -1228,10 +1230,10 @@ def _compose_main(argv: list[str] | None = None) -> int:
             # dirs left behind by an earlier crashed compose. Runs
             # under the same lock pair so a peer composer that started
             # mid-reconciliation can't observe a half-cleaned state.
-            # Blocking orphans (DRIFT, MALFORMED, unreapplyable PARTIAL)
-            # gate the run — surfaced via stderr and exit non-zero so
-            # the consumer's bootstrap fails fast instead of layering
-            # new mutations on top of an unresolved prior crash.
+            # Unresolved blocking orphans (DRIFT, MALFORMED, and
+            # unreapplyable PARTIAL) gate the run. Abandoned DRIFT and
+            # PARTIAL staging dirs are reclaimed and reported without
+            # gating because the current run can safely replace them.
             report = reconciliation.reconcile_orphans(
                 root, Path.home(), locks_held=True,
             )
@@ -1243,13 +1245,38 @@ def _compose_main(argv: list[str] | None = None) -> int:
                 or report.rolled_forward
                 or report.partial_reapplied
                 or report.blocking
+                or report.collected_stale
             ):
                 sys.stderr.write(
                     f"reconciliation: live={len(report.live)} "
                     f"rolled_back={len(report.rolled_back)} "
                     f"rolled_forward={len(report.rolled_forward)} "
                     f"reapplied={len(report.partial_reapplied)} "
+                    f"collected_stale={len(report.collected_stale)} "
                     f"blocking={len(report.blocking)}\n"
+                )
+            if report.collected_stale:
+                shown = ", ".join(
+                    str(path) for path in report.collected_stale[:5]
+                )
+                remaining = len(report.collected_stale) - 5
+                suffix = f" (+{remaining} more)" if remaining > 0 else ""
+                sys.stderr.write(
+                    "reconciliation: reclaimed staging residue from an "
+                    f"earlier crashed run: {shown}{suffix}\n"
+                )
+            live_bytes = sum(
+                reconciliation.staging_dir_bytes(path)
+                for path in report.live
+            )
+            if (
+                len(report.live) >= _LIVE_ORPHAN_ALARM_COUNT
+                or live_bytes >= _LIVE_ORPHAN_ALARM_BYTES
+            ):
+                sys.stderr.write(
+                    "advisory: multiple or large live orphan staging "
+                    f"directories remain: count={len(report.live)} "
+                    f"bytes={live_bytes}\n"
                 )
             if report.blocking:
                 paths = ", ".join(str(p) for p in report.blocking)
@@ -1259,6 +1286,11 @@ def _compose_main(argv: list[str] | None = None) -> int:
                     f"rerunning compose: {paths}\n"
                 )
                 return 1
+            # collected_stale deliberately does not change this return.
+            # pack-architecture.md says drift is reported rather than
+            # aborted, and bootstrap calls compose at every session start.
+            # Returning 1 after residue was cleaned would interrupt every
+            # session even though the current run already resolved it.
             return _do_compose_v2(
                 root,
                 parsed,
@@ -1432,7 +1464,13 @@ def _do_compose_v2(
     # `*.staging-*` so a crashed composer is recoverable on next startup
     # once Phase 4 wires reconciliation into bootstrap.
     staging_dir = root / ".agent-config" / f"pack-compose.staging-{os.getpid()}"
-    lock_path = root / ".agent-config" / ".pack-lock.lock"
+    # Derive from locks so this matches the path reconciliation compares
+    # against. The journal records this value, and reconciliation only
+    # recognises a lock as self-held when it equals one of the paths
+    # locks.py derives (anywhere-agents#19). A literal here would let the
+    # two drift apart silently, and abandoned residue would start gating
+    # every session again instead of being reclaimed.
+    lock_path = locks.repo_lock_path(root)
 
     # ----- Phase 8 pre-fetch: resolve archives before any staging -----
     # Building the archive list outside the staging transaction lets us

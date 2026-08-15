@@ -19,9 +19,11 @@ ownership is asserted at the bottom under ``TestClassifyOrphanOwnership``.
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -37,7 +39,8 @@ from packs import transaction as txn_mod  # noqa: E402
 
 def _orphan(
     staging_dir: Path, label: str, *, journal: dict | None = None,
-    ops: list | None = None, detail: str = "",
+    ops: list | None = None, detail: str = "", ownership: str = "unknown",
+    lock_ownership: str = "unknown",
 ) -> reconciliation.OrphanClassification:
     """Build a synthetic OrphanClassification with the requested label."""
     return reconciliation.OrphanClassification(
@@ -46,7 +49,36 @@ def _orphan(
         journal=journal,
         ops=ops or [],
         detail=detail,
+        ownership=ownership,
+        lock_ownership=lock_ownership,
     )
+
+
+def _exit_immediately() -> None:
+    """Provide a real PID that is known to have exited."""
+
+
+def _hold_live_orphan(
+    staging_dir_str: str,
+    lock_path_str: str,
+    target_path_str: str,
+    started_path_str: str,
+    release_path_str: str,
+) -> None:
+    """Create an orphan-like transaction and hold its lock until released."""
+    staging_dir = Path(staging_dir_str)
+    lock_path = Path(lock_path_str)
+    target_path = Path(target_path_str)
+    started_path = Path(started_path_str)
+    release_path = Path(release_path_str)
+    with locks.acquire(lock_path, timeout=5.0):
+        txn = txn_mod.Transaction(staging_dir, lock_path)
+        txn.__enter__()
+        txn.stage_write(target_path, b"new-content")
+        started_path.write_text("ready", encoding="utf-8")
+        deadline = time.monotonic() + 15.0
+        while not release_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
 
 
 class _OrchestratorFixture(unittest.TestCase):
@@ -108,6 +140,31 @@ class TestReconcileOrphansLockHeldFalse(_OrchestratorFixture):
         self.assertIn(locks.user_lock_path(self.user_root), acquired_paths)
         self.assertIn(locks.repo_lock_path(self.project_root), acquired_paths)
         self.assertIsNotNone(report)
+
+    def test_passes_held_lock_paths_to_scan(self) -> None:
+        captured: dict = {}
+
+        def fake_scan(_dirs, **kwargs):
+            captured.update(kwargs)
+            return []
+
+        with (
+            patch.object(reconciliation.locks, "acquire", _noop_acquire),
+            patch.object(reconciliation, "scan_orphans", side_effect=fake_scan),
+        ):
+            reconciliation.reconcile_orphans(
+                self.project_root, self.user_root, locks_held=False,
+            )
+
+        expected = frozenset({
+            reconciliation._normalize_lock_path(
+                locks.user_lock_path(self.user_root)
+            ),
+            reconciliation._normalize_lock_path(
+                locks.repo_lock_path(self.project_root)
+            ),
+        })
+        self.assertEqual(captured["held_lock_paths"], expected)
 
     def test_LIVE_classification_skips(self) -> None:
         """LIVE: do nothing — no cleanup, no drift_callback. Record skip."""
@@ -325,6 +382,32 @@ class TestReconcileOrphansLockHeldTrue(_OrchestratorFixture):
             )
         acquire.assert_not_called()
 
+    def test_passes_held_lock_paths_to_scan(self) -> None:
+        captured: dict = {}
+
+        def fake_scan(_dirs, **kwargs):
+            captured.update(kwargs)
+            return []
+
+        with (
+            patch.object(reconciliation.locks, "acquire") as acquire,
+            patch.object(reconciliation, "scan_orphans", side_effect=fake_scan),
+        ):
+            reconciliation.reconcile_orphans(
+                self.project_root, self.user_root, locks_held=True,
+            )
+
+        acquire.assert_not_called()
+        expected = frozenset({
+            reconciliation._normalize_lock_path(
+                locks.user_lock_path(self.user_root)
+            ),
+            reconciliation._normalize_lock_path(
+                locks.repo_lock_path(self.project_root)
+            ),
+        })
+        self.assertEqual(captured["held_lock_paths"], expected)
+
     def test_LIVE_classification_skips(self) -> None:
         orphan = _orphan(self.tmp_root / "live.staging-x", reconciliation.LIVE)
         with (
@@ -439,6 +522,207 @@ class TestReconcileOrphansLockHeldTrue(_OrchestratorFixture):
         self.assertEqual(len(self.drift_calls), 1)
         self.assertIs(self.drift_calls[0], orphan)
         self.assertIn(orphan.staging_dir, report.blocking)
+
+
+# =====================================================================
+# anywhere-agents#19: abandoned and concurrent transaction handling
+# =====================================================================
+
+
+class TestAbandonedOrphanCollection(_OrchestratorFixture):
+    def _reconcile_synthetic(
+        self, orphan: reconciliation.OrphanClassification,
+    ) -> reconciliation.ReconciliationReport:
+        with patch.object(
+            reconciliation, "scan_orphans", return_value=[orphan],
+        ):
+            return reconciliation.reconcile_orphans(
+                self.project_root,
+                self.user_root,
+                locks_held=True,
+                drift_callback=self._drift_callback,
+            )
+
+    def test_abandoned_drift_is_collected_not_blocking(self) -> None:
+        staging = self.tmp_root / "drift.staging-old"
+        orphan = _orphan(
+            staging,
+            reconciliation.DRIFT,
+            journal={"pid": os.getpid() + 1},
+            lock_ownership="self",
+        )
+        with patch.object(reconciliation, "cleanup_staging") as cleanup:
+            report = self._reconcile_synthetic(orphan)
+
+        cleanup.assert_called_once_with(staging)
+        self.assertEqual(report.collected_stale, [staging])
+        self.assertEqual(report.blocking, [])
+        self.assertEqual(self.drift_calls, [orphan])
+
+    def test_abandoned_partial_is_collected_without_reapply(self) -> None:
+        staging = self.tmp_root / "partial.staging-old"
+        orphan = _orphan(
+            staging,
+            reconciliation.PARTIAL,
+            journal={"pid": os.getpid() + 1},
+            lock_ownership="self",
+        )
+        with (
+            patch.object(reconciliation, "cleanup_staging") as cleanup,
+            patch.object(reconciliation, "_reapply_partial") as reapply,
+        ):
+            report = self._reconcile_synthetic(orphan)
+
+        reapply.assert_not_called()
+        cleanup.assert_called_once_with(staging)
+        self.assertEqual(report.collected_stale, [staging])
+        self.assertEqual(report.partial_reapplied, [])
+        self.assertEqual(report.blocking, [])
+
+    def test_self_pid_partial_still_reapplies(self) -> None:
+        staging = self.tmp_root / "partial.staging-current"
+        orphan = _orphan(
+            staging,
+            reconciliation.PARTIAL,
+            journal={"pid": os.getpid(), "ops": []},
+            ownership="self",
+            lock_ownership="self",
+        )
+        with (
+            patch.object(reconciliation, "cleanup_staging") as cleanup,
+            patch.object(reconciliation, "_reapply_partial") as reapply,
+        ):
+            report = self._reconcile_synthetic(orphan)
+
+        reapply.assert_called_once_with(orphan, force=True)
+        cleanup.assert_called_once_with(staging)
+        self.assertEqual(report.partial_reapplied, [staging])
+        self.assertEqual(report.collected_stale, [])
+
+    def test_foreign_lock_drift_still_blocking(self) -> None:
+        staging = self.tmp_root / "drift.staging-foreign"
+        orphan = _orphan(
+            staging,
+            reconciliation.DRIFT,
+            journal={"pid": os.getpid() + 1},
+            lock_ownership="foreign",
+        )
+        with patch.object(reconciliation, "cleanup_staging") as cleanup:
+            report = self._reconcile_synthetic(orphan)
+
+        cleanup.assert_not_called()
+        self.assertEqual(report.blocking, [staging])
+        self.assertEqual(report.collected_stale, [])
+
+    def test_malformed_never_collected(self) -> None:
+        staging = self.tmp_root / "malformed.staging-old"
+        orphan = _orphan(
+            staging,
+            reconciliation.MALFORMED,
+            journal={"pid": os.getpid() + 1},
+            lock_ownership="self",
+        )
+        with patch.object(reconciliation, "cleanup_staging") as cleanup:
+            report = self._reconcile_synthetic(orphan)
+
+        cleanup.assert_not_called()
+        self.assertEqual(report.blocking, [staging])
+        self.assertEqual(report.collected_stale, [])
+
+    def test_orphan_under_held_repo_lock_is_collected_end_to_end(self) -> None:
+        exited = multiprocessing.Process(target=_exit_immediately)
+        exited.start()
+        exited.join(timeout=10.0)
+        self.assertFalse(exited.is_alive())
+        self.assertEqual(exited.exitcode, 0)
+        self.assertIsNotNone(exited.pid)
+        dead_pid = int(exited.pid)
+
+        agent_config = self.project_root / ".agent-config"
+        staging = agent_config / f"pack-compose.staging-{dead_pid}"
+        target = self.project_root / "output.txt"
+        target.write_bytes(b"pre")
+        repo_lock = locks.repo_lock_path(self.project_root)
+        txn = txn_mod.Transaction(staging, repo_lock)
+        txn.__enter__()
+        txn.stage_write(target, b"new-content")
+        target.write_bytes(b"unexpected")
+
+        journal_path = staging / txn_mod.JOURNAL_NAME
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        journal["pid"] = dead_pid
+        journal_path.write_text(
+            json.dumps(journal, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        user_lock = locks.user_lock_path(self.user_root)
+        with (
+            locks.acquire(user_lock, timeout=5.0),
+            locks.acquire(repo_lock, timeout=5.0),
+        ):
+            report = reconciliation.reconcile_orphans(
+                self.project_root,
+                self.user_root,
+                locks_held=True,
+                drift_callback=self._drift_callback,
+            )
+
+        self.assertFalse(staging.exists())
+        self.assertEqual(report.collected_stale, [staging])
+        self.assertEqual(report.live, [])
+        self.assertEqual(report.blocking, [])
+        self.assertEqual(len(self.drift_calls), 1)
+        self.assertEqual(self.drift_calls[0].lock_ownership, "self")
+
+    def test_second_composer_leaves_concurrent_live_staging(self) -> None:
+        agent_config = self.project_root / ".agent-config"
+        staging = agent_config / "pack-compose.staging-live-peer"
+        target = self.project_root / "peer-output.txt"
+        target.write_bytes(b"pre")
+        peer_lock = self.tmp_root / "peer-composer.lock"
+        started = self.tmp_root / "peer-started.flag"
+        release = self.tmp_root / "peer-release.flag"
+        proc = multiprocessing.Process(
+            target=_hold_live_orphan,
+            args=(
+                str(staging),
+                str(peer_lock),
+                str(target),
+                str(started),
+                str(release),
+            ),
+        )
+        proc.start()
+
+        def finish_process() -> None:
+            release.write_text("release", encoding="utf-8")
+            proc.join(timeout=10.0)
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=10.0)
+
+        self.addCleanup(finish_process)
+        deadline = time.monotonic() + 15.0
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(started.exists(), f"peer exitcode={proc.exitcode}")
+        self.assertTrue(proc.is_alive())
+
+        user_lock = locks.user_lock_path(self.user_root)
+        repo_lock = locks.repo_lock_path(self.project_root)
+        with (
+            locks.acquire(user_lock, timeout=5.0),
+            locks.acquire(repo_lock, timeout=5.0),
+        ):
+            report = reconciliation.reconcile_orphans(
+                self.project_root, self.user_root, locks_held=True,
+            )
+
+        self.assertTrue(staging.exists())
+        self.assertEqual(report.live, [staging])
+        self.assertEqual(report.collected_stale, [])
+        self.assertEqual(report.blocking, [])
 
 
 # =====================================================================

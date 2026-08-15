@@ -1541,6 +1541,112 @@ class TestReconcileOrphansSummary(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertNotIn("reconciliation:", err)
 
+    def test_collected_stale_reports_and_does_not_gate(self) -> None:
+        @contextmanager
+        def _ctx(*_args, **_kwargs):
+            yield None
+
+        report = reconciliation_mod.ReconciliationReport()
+        report.collected_stale.append(self.root / "old.staging-1")
+
+        with (
+            patch.object(locks, "acquire", side_effect=_ctx),
+            patch.object(
+                reconciliation_mod, "reconcile_orphans", return_value=report,
+            ),
+            patch.object(
+                compose_packs, "_do_compose_v2", return_value=0,
+            ) as inner,
+        ):
+            rc, _out, err = _invoke(["--root", str(self.root)])
+
+        self.assertEqual(rc, 0)
+        inner.assert_called_once()
+        self.assertIn("collected_stale=1", err)
+        self.assertIn("reclaimed staging residue", err)
+
+    def test_live_orphan_alarm_fires_at_threshold(self) -> None:
+        @contextmanager
+        def _ctx(*_args, **_kwargs):
+            yield None
+
+        report = reconciliation_mod.ReconciliationReport()
+        report.live.extend(
+            self.root / f"peer.staging-{index}" for index in range(3)
+        )
+
+        with (
+            patch.object(locks, "acquire", side_effect=_ctx),
+            patch.object(
+                reconciliation_mod, "reconcile_orphans", return_value=report,
+            ),
+            patch.object(
+                compose_packs, "_do_compose_v2", return_value=0,
+            ) as inner,
+        ):
+            rc, _out, err = _invoke(["--root", str(self.root)])
+
+        self.assertEqual(rc, 0)
+        inner.assert_called_once()
+        self.assertIn("advisory:", err)
+        self.assertIn("count=3", err)
+
+    def test_live_orphan_alarm_silent_below_threshold(self) -> None:
+        @contextmanager
+        def _ctx(*_args, **_kwargs):
+            yield None
+
+        report = reconciliation_mod.ReconciliationReport()
+        report.live.extend(
+            self.root / f"peer.staging-{index}" for index in range(2)
+        )
+
+        with (
+            patch.object(locks, "acquire", side_effect=_ctx),
+            patch.object(
+                reconciliation_mod, "reconcile_orphans", return_value=report,
+            ),
+            patch.object(
+                compose_packs, "_do_compose_v2", return_value=0,
+            ) as inner,
+        ):
+            rc, _out, err = _invoke(["--root", str(self.root)])
+
+        self.assertEqual(rc, 0)
+        inner.assert_called_once()
+        self.assertNotIn("advisory:", err)
+
+    def test_live_orphan_alarm_fires_at_byte_threshold(self) -> None:
+        @contextmanager
+        def _ctx(*_args, **_kwargs):
+            yield None
+
+        report = reconciliation_mod.ReconciliationReport()
+        report.live.append(self.root / "peer.staging-large")
+
+        with (
+            patch.object(locks, "acquire", side_effect=_ctx),
+            patch.object(
+                reconciliation_mod, "reconcile_orphans", return_value=report,
+            ),
+            patch.object(
+                reconciliation_mod,
+                "staging_dir_bytes",
+                return_value=compose_packs._LIVE_ORPHAN_ALARM_BYTES,
+            ),
+            patch.object(
+                compose_packs, "_do_compose_v2", return_value=0,
+            ) as inner,
+        ):
+            rc, _out, err = _invoke(["--root", str(self.root)])
+
+        self.assertEqual(rc, 0)
+        inner.assert_called_once()
+        self.assertIn("advisory:", err)
+        self.assertIn(
+            f"bytes={compose_packs._LIVE_ORPHAN_ALARM_BYTES}", err,
+        )
+
     def test_prints_summary_when_real_work_done(self) -> None:
         """Conversely, when reconciliation actually rolled-back / forward
         / reapplied / blocked an orphan, the summary line MUST appear so

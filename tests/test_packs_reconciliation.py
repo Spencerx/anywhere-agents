@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import os
 import sys
 import tempfile
 import time
@@ -201,10 +202,66 @@ class LiveTransactionTests(_TmpDirCase):
             time.sleep(0.05)
         self.assertTrue(started.exists())
 
-        result = reconciliation.classify_orphan(staging)
+        result = reconciliation.classify_orphan(
+            staging, held_lock_paths=frozenset(),
+        )
         self.assertEqual(result.label, reconciliation.LIVE)
+        self.assertEqual(result.lock_ownership, "foreign")
 
         proc.join(timeout=10.0)
+
+
+class SelfHeldLockTests(_TmpDirCase):
+    def test_self_held_lock_does_not_short_circuit_to_live(self) -> None:
+        target = self.root / "out.txt"
+        target.write_bytes(b"pre")
+        staging = self._orphan_for(target, b"new-content")
+        held = frozenset({
+            reconciliation._normalize_lock_path(self.lock_path),
+        })
+
+        with locks.acquire(self.lock_path, timeout=5.0):
+            self.assertTrue(locks.is_held(self.lock_path))
+            result = reconciliation.classify_orphan(
+                staging,
+                locks_held=True,
+                held_lock_paths=held,
+            )
+
+        self.assertEqual(result.label, reconciliation.ROLLBACK_OK)
+        self.assertEqual(result.lock_ownership, "self")
+
+    def test_unheld_lock_sets_lock_ownership_none(self) -> None:
+        target = self.root / "out.txt"
+        target.write_bytes(b"pre")
+        staging = self._orphan_for(target, b"new-content")
+
+        result = reconciliation.classify_orphan(
+            staging, held_lock_paths=frozenset(),
+        )
+
+        self.assertEqual(result.label, reconciliation.ROLLBACK_OK)
+        self.assertEqual(result.lock_ownership, "none")
+
+    def test_held_lock_path_match_is_normalized(self) -> None:
+        target = self.root / "out.txt"
+        target.write_bytes(b"pre")
+        staging = self._orphan_for(target, b"new-content")
+        noncanonical = os.path.join(
+            str(self.lock_path.parent), ".", self.lock_path.name,
+        )
+        if sys.platform == "win32":
+            drive, tail = os.path.splitdrive(noncanonical)
+            noncanonical = drive.upper() + tail
+        held = frozenset({
+            reconciliation._normalize_lock_path(noncanonical),
+        })
+
+        result = reconciliation.classify_orphan(
+            staging, held_lock_paths=held,
+        )
+
+        self.assertEqual(result.lock_ownership, "self")
 
 
 # ---------- scan + cleanup ----------
@@ -259,6 +316,22 @@ class CleanupStagingTests(_TmpDirCase):
         staging.mkdir()
         reconciliation.cleanup_staging(staging)
         self.assertFalse(staging.exists())
+
+
+class StagingDirBytesTests(_TmpDirCase):
+    def test_sums_regular_files_recursively(self) -> None:
+        staging = self.root / "size.staging-x"
+        nested = staging / "nested"
+        nested.mkdir(parents=True)
+        (staging / "one.bin").write_bytes(b"123")
+        (nested / "two.bin").write_bytes(b"4567")
+
+        self.assertEqual(reconciliation.staging_dir_bytes(staging), 7)
+
+    def test_missing_directory_has_zero_bytes(self) -> None:
+        self.assertEqual(
+            reconciliation.staging_dir_bytes(self.root / "missing"), 0,
+        )
 
 
 if __name__ == "__main__":

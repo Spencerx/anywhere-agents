@@ -7,9 +7,10 @@ and new-content hashes, then one of:
 
 - ``LIVE`` — another process still holds the transaction's lock file.
   Skipped without touching anything; the peer composer's commit or
-  rollback will clean this up on its own exit. Windows busy-lock where
-  the holder PID cannot be confirmed is treated the same as a proven
-  live holder (``locks.is_held`` returns ``True`` for both).
+  rollback will clean this up on its own exit. The lock probe is skipped
+  when the recorded lock is one the caller already holds. Windows
+  busy-lock where the holder PID cannot be confirmed is treated the same
+  as a proven live holder (``locks.is_held`` returns ``True`` for both).
 
   v0.5.0 Phase 8 adds a self-vs-foreign distinction for the ``locks_held``
   case: when the orchestrator already owns the lock pair AND the journal's
@@ -34,6 +35,9 @@ and new-content hashes, then one of:
   a drift report per pack-architecture.md § "Atomicity contract".
 - ``MALFORMED`` — the journal cannot be read as JSON. Leave the staging
   directory alone; surface to the user.
+- Collected stale - a would-be-blocking DRIFT or PARTIAL transaction whose
+  recorded lock is held by this process and whose journal PID belongs to
+  an earlier run. Delete only its staging directory and continue.
 
 The module exposes two layers:
 
@@ -43,9 +47,10 @@ The module exposes two layers:
 2. ``reconcile_orphans`` (v0.5.0 Phase 7 / Deferral 2) — orchestrator
    wrapper consumed by ``compose_packs.main``. Walks the orphan list
    produced by ``scan_orphans`` and dispatches per-label: LIVE skip,
-   ROLLBACK_OK / ROLLFORWARD_OK cleanup-only, PARTIAL reapply-or-drift,
-   DRIFT / MALFORMED surface via ``drift_callback``. Optionally takes
-   the user/repo lock pair itself when called outside compose
+   ROLLBACK_OK / ROLLFORWARD_OK cleanup-only, abandoned DRIFT / PARTIAL
+   collect without gating, other PARTIAL reapply-or-drift, and DRIFT /
+   MALFORMED surface via ``drift_callback``. Optionally takes the
+   user/repo lock pair itself when called outside compose
    (``locks_held=False``).
 """
 from __future__ import annotations
@@ -70,6 +75,11 @@ DRIFT = "drift"
 MALFORMED = "malformed"
 
 
+def _normalize_lock_path(path) -> str:
+    """Return the comparison key used for recorded and derived lock paths."""
+    return os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
+
+
 @dataclass
 class OpClassification:
     """Per-op reconciliation result within a transaction."""
@@ -84,11 +94,13 @@ class OpClassification:
 class OrphanClassification:
     """Overall reconciliation result for one orphan staging directory.
 
-    ``ownership`` is added in v0.5.0 Phase 8 to distinguish a partial
-    transaction from THIS process (``"self"``) from one left behind by a
-    foreign / earlier process (``"foreign"``). Set to ``"unknown"`` when
-    the journal's PID could not be read or when the caller did not pass
-    ``locks_held=True`` (the foreign-process safety check still applies).
+    ``ownership`` compares the journal PID with the caller PID. It is
+    ``"unknown"`` when the caller did not pass ``locks_held=True``.
+    ``lock_ownership`` separately records whether the journal's lock path
+    is one the caller holds (``"self"``), a contended foreign lock
+    (``"foreign"``), an unheld lock (``"none"``), or unavailable
+    (``"unknown"``). The two fields intentionally answer different
+    questions and are computed independently.
     """
 
     staging_dir: Path
@@ -97,6 +109,7 @@ class OrphanClassification:
     ops: list[OpClassification] = field(default_factory=list)
     detail: str = ""
     ownership: str = "unknown"
+    lock_ownership: str = "unknown"
 
 
 def _sha256_of_path(path: Path) -> str | None:
@@ -184,11 +197,12 @@ def classify_orphan(
     *,
     locks_held: bool = False,
     owner_pid: int | None = None,
+    held_lock_paths: frozenset[str] | None = None,
 ) -> OrphanClassification:
     """Inspect one orphan staging directory and classify it.
 
-    Reads the transaction journal, checks lock contention first (a live
-    transaction always short-circuits), then compares on-disk content
+    Reads the transaction journal, checks foreign lock contention first
+    (a live peer always short-circuits), then compares on-disk content
     against each op's pre-state / new-content hashes.
 
     Parameters
@@ -206,9 +220,15 @@ def classify_orphan(
         safety check on a self-partial. With ``locks_held=False`` the
         ownership stays ``"unknown"`` and existing semantics apply.
     owner_pid
-        Optional override for the "this process's PID" comparison —
+        Optional override for the "this process's PID" comparison -
         useful in tests where a fixture writes a journal under a
         synthesised PID. Ignored when ``locks_held=False``.
+    held_lock_paths
+        Set of already-normalized lock-path strings held by the caller.
+        :func:`reconcile_orphans` derives this set internally and does not
+        accept it from outside the module. Membership means a contention
+        probe on that path would be self-inflicted and therefore cannot
+        establish that a peer transaction is live.
     """
     journal_path = staging_dir / txn_mod.JOURNAL_NAME
     if not journal_path.exists():
@@ -240,20 +260,30 @@ def classify_orphan(
         else:
             ownership = "foreign"
 
+    lock_ownership = "unknown"
     lock_path_str = journal.get("lock_path")
     if isinstance(lock_path_str, str) and lock_path_str:
         lock_path = Path(lock_path_str)
-        # Contention on the recorded lock path is authoritative: even
-        # on Windows where holder PID cannot always be confirmed, a
-        # busy lock means "live transaction, skip and retry".
-        if locks.is_held(lock_path):
+        normalized_lock_path = _normalize_lock_path(lock_path)
+        if normalized_lock_path in (held_lock_paths or frozenset()):
+            # anywhere-agents#19: probing a lock the caller holds reports
+            # contention with the caller itself, so it cannot prove LIVE.
+            lock_ownership = "self"
+        elif locks.is_held(lock_path):
+            # Contention on a foreign recorded lock path is authoritative:
+            # even on Windows where holder PID cannot always be confirmed,
+            # a busy lock means "live transaction, skip and retry".
+            lock_ownership = "foreign"
             return OrphanClassification(
                 staging_dir=staging_dir,
                 label=LIVE,
                 journal=journal,
                 detail=f"lock {lock_path} is held; skip this pass",
                 ownership=ownership,
+                lock_ownership=lock_ownership,
             )
+        else:
+            lock_ownership = "none"
 
     ops_in_journal = journal.get("ops")
     if not isinstance(ops_in_journal, list):
@@ -263,6 +293,7 @@ def classify_orphan(
             journal=journal,
             detail="journal 'ops' is not a list",
             ownership=ownership,
+            lock_ownership=lock_ownership,
         )
 
     classifications: list[OpClassification] = []
@@ -274,6 +305,7 @@ def classify_orphan(
                 journal=journal,
                 detail=f"op[{idx}] is malformed",
                 ownership=ownership,
+                lock_ownership=lock_ownership,
             )
         kind = op["op"]
         try:
@@ -290,6 +322,7 @@ def classify_orphan(
                     journal=journal,
                     detail=f"op[{idx}] unknown kind {kind!r}",
                     ownership=ownership,
+                    lock_ownership=lock_ownership,
                 )
         except (KeyError, TypeError, ValueError) as exc:
             # Structural field errors (missing target_path, wrong types,
@@ -303,6 +336,7 @@ def classify_orphan(
                 journal=journal,
                 detail=f"op[{idx}] missing or invalid field: {exc}",
                 ownership=ownership,
+                lock_ownership=lock_ownership,
             )
         except OSError as exc:
             return OrphanClassification(
@@ -311,6 +345,7 @@ def classify_orphan(
                 journal=journal,
                 detail=f"cannot read op[{idx}] target: {exc}",
                 ownership=ownership,
+                lock_ownership=lock_ownership,
             )
         cls.op_index = idx
         classifications.append(cls)
@@ -334,6 +369,7 @@ def classify_orphan(
         journal=journal,
         ops=classifications,
         ownership=ownership,
+        lock_ownership=lock_ownership,
     )
 
 
@@ -342,6 +378,7 @@ def scan_orphans(
     *,
     locks_held: bool = False,
     owner_pid: int | None = None,
+    held_lock_paths: frozenset[str] | None = None,
 ) -> list[OrphanClassification]:
     """Find and classify every ``*.staging-*`` dir containing a journal.
 
@@ -349,9 +386,9 @@ def scan_orphans(
     staging parent) and ``<project>/.agent-config/`` (project-local
     staging parent). Non-existent search dirs are silently skipped.
 
-    ``locks_held`` and ``owner_pid`` are forwarded to
-    :func:`classify_orphan` so the per-orphan ownership label reflects
-    whether the caller holds the compose lock pair (v0.5.0 Phase 8).
+    ``locks_held``, ``owner_pid``, and ``held_lock_paths`` are forwarded
+    to :func:`classify_orphan`. The first two determine journal-PID
+    ownership; the last identifies lock contention caused by the caller.
     """
     results: list[OrphanClassification] = []
     for base in search_dirs:
@@ -367,7 +404,10 @@ def scan_orphans(
                 continue
             results.append(
                 classify_orphan(
-                    entry, locks_held=locks_held, owner_pid=owner_pid,
+                    entry,
+                    locks_held=locks_held,
+                    owner_pid=owner_pid,
+                    held_lock_paths=held_lock_paths,
                 )
             )
     return results
@@ -411,6 +451,29 @@ def _rmtree(root: Path) -> None:
         pass
 
 
+def staging_dir_bytes(staging_dir: Path) -> int:
+    """Return the size of regular files below ``staging_dir``.
+
+    Missing or unreadable entries contribute zero so advisory reporting
+    cannot turn a reconciliation pass into a bootstrap failure.
+    """
+    total = 0
+    try:
+        entries = os.scandir(staging_dir)
+    except OSError:
+        return 0
+    with entries:
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    total += staging_dir_bytes(Path(entry.path))
+                elif entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+    return total
+
+
 # ----- v0.5.0 Phase 7 / Deferral 2: orchestrator wrapper -----
 
 
@@ -433,6 +496,10 @@ class ReconciliationReport:
     - ``blocking`` — DRIFT, MALFORMED, and unreapplyable PARTIAL orphans
       whose staging dirs were left in place; these surface to the user
       via ``drift_callback`` (when supplied) and gate the compose run.
+    - ``collected_stale`` - staging dirs proven abandoned because the
+      recorded lock is held by this process and the journal PID belongs
+      to an earlier run. Reconciliation deletes only the staging dir,
+      never a journal target, and these entries do not gate compose.
     """
 
     live: list[Path] = field(default_factory=list)
@@ -440,6 +507,7 @@ class ReconciliationReport:
     rolled_forward: list[Path] = field(default_factory=list)
     partial_reapplied: list[Path] = field(default_factory=list)
     blocking: list[Path] = field(default_factory=list)
+    collected_stale: list[Path] = field(default_factory=list)
 
 
 def _collect_staging_dirs(project_root: Path, user_root: Path) -> list[Path]:
@@ -491,6 +559,21 @@ def _can_reapply_partial(orphan: OrphanClassification) -> bool:
         # target is still present (or absent in the same way it was
         # absent before staging — see _classify_delete_op).
     return True
+
+
+def _is_abandoned(
+    orphan: OrphanClassification, comparison_pid: int,
+) -> bool:
+    """Return whether a would-be blocker is provably from an earlier run.
+
+    ``lock_ownership == "self"`` proves that no peer can be mid-transaction
+    on the recorded lock. A different journal PID proves that the owning
+    run is not this one, so no process can ever resume this transaction.
+    """
+    if orphan.lock_ownership != "self":
+        return False
+    journal_pid = (orphan.journal or {}).get("pid")
+    return isinstance(journal_pid, int) and journal_pid != comparison_pid
 
 
 class ForeignPartialError(RuntimeError):
@@ -570,17 +653,22 @@ def _reconcile_inner(
     *,
     locks_held: bool = False,
     owner_pid: int | None = None,
+    held_lock_paths: frozenset[str] | None = None,
 ) -> ReconciliationReport:
     """Single-pass dispatch over the orphan list. Locks are caller-owned.
 
-    ``locks_held`` / ``owner_pid`` are forwarded to ``scan_orphans`` so
-    the ``OrphanClassification.ownership`` field reflects whether the
-    orphan came from THIS process (self) or a foreign one.
+    ``locks_held``, ``owner_pid``, and ``held_lock_paths`` are forwarded
+    to ``scan_orphans`` so PID ownership and lock ownership remain
+    independently available to the dispatcher.
     """
     staging_dirs = _collect_staging_dirs(project_root, user_root)
     report = ReconciliationReport()
+    comparison_pid = owner_pid if owner_pid is not None else os.getpid()
     for orphan in scan_orphans(
-        staging_dirs, locks_held=locks_held, owner_pid=owner_pid,
+        staging_dirs,
+        locks_held=locks_held,
+        owner_pid=owner_pid,
+        held_lock_paths=held_lock_paths,
     ):
         if orphan.label == LIVE:
             report.live.append(orphan.staging_dir)
@@ -591,7 +679,17 @@ def _reconcile_inner(
             cleanup_staging(orphan.staging_dir)
             report.rolled_forward.append(orphan.staging_dir)
         elif orphan.label == PARTIAL:
-            if _can_reapply_partial(orphan):
+            if _is_abandoned(orphan, comparison_pid):
+                # Drop an abandoned PARTIAL instead of finishing it. Its
+                # staged bytes may be from an older release, and reapply
+                # would call _atomic_replace on the same target whose lock
+                # accompanied the original crash. The current compose run
+                # stages every output again after this cleanup-only action.
+                if drift_callback is not None:
+                    drift_callback(orphan)
+                cleanup_staging(orphan.staging_dir)
+                report.collected_stale.append(orphan.staging_dir)
+            elif _can_reapply_partial(orphan):
                 # v0.5.0 Phase 8: self-orphans (this run's own crashed
                 # transaction) bypass the foreign-process gate inside
                 # ``_reapply_partial`` via ``force=True``. Foreign and
@@ -614,7 +712,15 @@ def _reconcile_inner(
                 if drift_callback is not None:
                     drift_callback(orphan)
                 report.blocking.append(orphan.staging_dir)
-        elif orphan.label in (DRIFT, MALFORMED):
+        elif orphan.label == DRIFT:
+            if drift_callback is not None:
+                drift_callback(orphan)
+            if _is_abandoned(orphan, comparison_pid):
+                cleanup_staging(orphan.staging_dir)
+                report.collected_stale.append(orphan.staging_dir)
+            else:
+                report.blocking.append(orphan.staging_dir)
+        elif orphan.label == MALFORMED:
             if drift_callback is not None:
                 drift_callback(orphan)
             report.blocking.append(orphan.staging_dir)
@@ -652,10 +758,10 @@ def reconcile_orphans(
         outside compose (e.g., a CLI ``pack list --drift`` audit) — the
         wrapper takes both locks itself for the duration of the pass.
     drift_callback
-        Optional sink invoked once per blocking orphan (DRIFT, MALFORMED,
-        or PARTIAL whose staged files cannot be reapplied). Compose uses
-        this to populate ``pending-updates.json``; CLI audit modes can
-        pass a printer.
+        Optional sink invoked once per surfaced orphan: blocking DRIFT,
+        MALFORMED, unreapplyable PARTIAL, or an abandoned DRIFT / PARTIAL
+        collected during this pass. Compose uses this to populate
+        ``pending-updates.json``; CLI audit modes can pass a printer.
 
     Returns
     -------
@@ -665,15 +771,18 @@ def reconcile_orphans(
 
     Notes
     -----
-    The ``locks_held=True`` path relies on the classifier itself
-    distinguishing self-held locks (recorded sidecar PID equal to
-    ``os.getpid()``) from foreign-held locks. v0.5.0 ships the wrapper;
-    a sibling task extends ``classify_orphan`` so a self-held lock no
-    longer reads as LIVE. Until that lands, callers passing
-    ``locks_held=True`` should arrange for their own staging dirs to be
-    cleaned up by their own commit/rollback paths (compose's transaction
-    block handles this) so reconciliation only ever sees foreign orphans.
+    Both branches pass the exact derived user and repo lock paths to the
+    classifier. A recorded lock in that set is recognized as self-held
+    and is never probed as LIVE. If such an orphan would block and its
+    journal PID belongs to an earlier run, reconciliation collects its
+    staging directory instead of gating the run. The ``locks_held=True``
+    path therefore requires the caller to hold exactly this derived pair;
+    the set is intentionally derived here rather than caller-supplied.
     """
+    held = frozenset({
+        _normalize_lock_path(locks.user_lock_path(user_root)),
+        _normalize_lock_path(locks.repo_lock_path(project_root)),
+    })
     if not locks_held:
         with (
             locks.acquire(locks.user_lock_path(user_root), timeout=30),
@@ -682,7 +791,10 @@ def reconcile_orphans(
             return _reconcile_inner(
                 project_root, user_root, drift_callback,
                 locks_held=False,
+                held_lock_paths=held,
             )
     return _reconcile_inner(
-        project_root, user_root, drift_callback, locks_held=True,
+        project_root, user_root, drift_callback,
+        locks_held=True,
+        held_lock_paths=held,
     )
