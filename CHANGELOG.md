@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Version tags apply uniformly to the repo content **and** the matching `anywhere-agents` PyPI / npm packages — they share one release stream. Consumers pinned to a specific tag get a stable snapshot; consumers on `main` receive ongoing updates.
 
-## [Unreleased]
+## [0.7.13] — 2026-08-14
 
 ### Fixed
 
@@ -1038,7 +1038,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.12...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.13...HEAD
+[0.7.13]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.12...v0.7.13
 [0.7.12]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.11...v0.7.12
 [0.7.11]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.10...v0.7.11
 [0.7.10]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.9...v0.7.10
