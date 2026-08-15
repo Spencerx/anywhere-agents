@@ -349,12 +349,17 @@ try {
 # $LASTEXITCODE the way this script would otherwise rely on. Probe every
 # candidate with an import-and-exit test, and gate subsequent checks on both
 # $? (native launch success) AND $LASTEXITCODE (the program's own exit).
+# Exit status alone is not proof that Python ran. A command that ignores its
+# arguments and exits 0, such as true.exe or a .cmd containing only `exit /b 0`,
+# passes an exit-status probe while executing nothing. Require the interpreter
+# to echo a sentinel, so only something that actually evaluated the -c program
+# is accepted.
 function Test-PythonRuns([string]$PythonPath) {
   try {
     $global:LASTEXITCODE = $null
-    & $PythonPath -c "import sys; raise SystemExit(0 if sys.version_info[0] >= 3 else 1)" *>$null
+    $probeOutput = & $PythonPath -c 'import sys; sys.stdout.write("__ANYWHERE_AGENTS_PY3__" if sys.version_info[0] >= 3 else "")' 2>$null
     $launched = $?
-    return ($launched -and $LASTEXITCODE -eq 0)
+    return ($launched -and $LASTEXITCODE -eq 0 -and ([string]$probeOutput).Trim() -eq '__ANYWHERE_AGENTS_PY3__')
   } catch {
     return $false
   }

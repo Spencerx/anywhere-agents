@@ -90,8 +90,14 @@ fi
 # "Python was not found; install from Store" and exits non-zero on call).
 # Order: env override > deployed wrapper > sparse-clone wrapper > PATH lookup
 # with shim skip. See https://github.com/yzhao062/anywhere-agents/issues/2.
+# Exit status alone is not proof that Python ran. A command that ignores its
+# arguments and exits 0, such as `true` or a .cmd containing only `exit /b 0`,
+# passes an exit-status probe while executing nothing. Require the interpreter
+# to echo a sentinel, so only something that actually evaluated the -c program
+# is accepted.
 _python_runs() {
-  "$1" -c 'import sys; raise SystemExit(0 if sys.version_info[0] >= 3 else 1)' >/dev/null 2>&1
+  _probe_output="$("$1" -c 'import sys; sys.stdout.write("__ANYWHERE_AGENTS_PY3__" if sys.version_info[0] >= 3 else "")' 2>/dev/null)" || return 1
+  [ "$_probe_output" = "__ANYWHERE_AGENTS_PY3__" ]
 }
 
 _find_python() {
