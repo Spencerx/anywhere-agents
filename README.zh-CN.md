@@ -320,6 +320,8 @@ rule_packs:
 
     argv 或 `AGENT_CONFIG_UPSTREAM` 环境变量里传进去的值会被存到 `.agent-config/upstream`，之后 session hook 自动读它 —— 每个 consumer 项目传一次就够。后来再设环境变量会覆盖持久化的值，所以环境变量既能第一次设置、也能改长期 upstream。
 
+    每次 bootstrap 运行都会在每个阶段结束后重写 `.agent-config/last-run.json`。对 CI 来说，`completed: false` 配合 `last_phase` 就能把一次中途停下的运行和一份过期产物区分开。这个文件在自动被 ignore 的 `.agent-config/` 目录里，不会被提交。它只记录 bootstrap 脚本自己的写入；`anywhere-agents` 命令之后还会多跑一轮 `pack verify --fix`，那一阶段的状态记录在 `.agent-config/pack-lock.json`。
+
 4. **想拉上游更新时：**
 
     ```bash
