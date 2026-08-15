@@ -318,6 +318,8 @@ Want to diverge — change writing defaults, add skills, swap the reviewer? Stan
 
     Whichever value you pass (argv or `AGENT_CONFIG_UPSTREAM` env var) is persisted to `.agent-config/upstream` on that run, so later session-hook invocations pick it up automatically; you only pass it once per consumer project. Setting the env var on a later run updates the persisted value, so the env var can both seed and change the long-term upstream.
 
+    Each bootstrap run rewrites `.agent-config/last-run.json` after every phase. For CI, `completed: false` together with `last_phase` identifies a partial run. The file is inside the automatically ignored `.agent-config/` directory, so it is never committed. It records the bootstrap script's own writes. The `anywhere-agents` command runs an additional `pack verify --fix` phase afterward, whose state is recorded in `.agent-config/pack-lock.json`.
+
 4. **Pull upstream updates when you want them:**
 
     ```bash
