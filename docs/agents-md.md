@@ -62,6 +62,8 @@ Full guide for registering Codex as an MCP server inside Claude Code. Covers:
 - No em-dashes (`—`) or en-dashes (`–`) as casual punctuation. Prefer commas, semicolons, colons, parentheses.
 - Normal hyphenation (`command-line`, `co-PI`, `zero-shot`) and numeric ranges (`1–3`, `2020–2025`) are fine.
 - Vary sentence length and structure; not every paragraph needs a tidy summary sentence.
+- Copy-paste-destined drafts go in a fenced code block, one unbroken line per paragraph, no wrapping to a display width.
+- Document-length drafts (an email, a letter) go in a `.md` file, not the terminal. Markdown pasted as plain text loses its formatting in Outlook and Gmail, so offer a rendered view when the formatting matters.
 
 ## Git Safety
 
