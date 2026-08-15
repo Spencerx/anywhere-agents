@@ -55,18 +55,23 @@ git diff --name-only HEAD~1 HEAD -- README.md README.zh-CN.md
 bash ../agent-config/scripts/check-parity.sh
 #    The script splits shared-core files into two categories:
 #      STRICT (must be byte-identical; any diff or missing file fails):
-#        scripts/{guard.py, session_bootstrap.py, generate_agent_configs.py, pre-push-smoke.sh,
-#        remote-smoke.sh}, .claude/settings.json, .githooks/pre-push,
-#        .github/workflows/{real-agent-smoke.yml, validate.yml}, .claude/commands/*.md
+#        scripts/{_python, guard.py, session_bootstrap.py, statusline.py, agent-quota.py,
+#        generate_agent_configs.py, pre-push-smoke.sh, remote-smoke.sh, check-parity.sh},
+#        .claude/settings.json, .githooks/pre-push,
+#        .github/workflows/{real-agent-smoke.yml, validate.yml},
+#        bootstrap/bootstrap.{sh,ps1}, .claude/commands/*.md
 #        for all 5 shipped skills, and the STRICT skill trees (recursive)
 #        skills/{implement-review,ci-mockup-figure,readme-polish,prun}
 #        (skills/my-router is BY-DESIGN below).
 #      BY-DESIGN (expected to differ; both sides must exist; a +/- line delta is
 #      reported per file for eyeball):
 #        AGENTS.md (USC / Overleaf / PyCharm stripping),
-#        bootstrap/bootstrap.{sh,ps1} (default-upstream + CRLF-config stripping),
 #        user/settings.json (additionalDirectories stripping),
 #        skills/my-router (routing-table rewrite + extension guidance for forks).
+#    bootstrap/bootstrap.{sh,ps1} were BY-DESIGN until ac/bootstrap was re-synced to aa's
+#    canonical composer-aware version. They are STRICT now: ac's bootstrap snippet still
+#    curls from ac, but the file served is byte-identical to aa's. check-parity.sh is the
+#    authority for both lists; this comment is a summary and can drift.
 #    Exit 0 means STRICT clean and every BY-DESIGN mirror present. Exit 1 means either
 #    STRICT drift or a missing required BY-DESIGN mirror, and must be fixed before
 #    tagging. A byte-for-byte match in BY-DESIGN is flagged as a warning because it
