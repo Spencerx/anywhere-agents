@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Version tags apply uniformly to the repo content **and** the matching `anywhere-agents` PyPI / npm packages — they share one release stream. Consumers pinned to a specific tag get a stable snapshot; consumers on `main` receive ongoing updates.
 
+## [0.7.14] — 2026-08-15
+
+### Fixed
+
+- **Two bootstrap runs that overlap no longer tear the files they deploy** ([#31](https://github.com/yzhao062/anywhere-agents/issues/31)). `_find_python` probes and executes `$HOME/.claude/hooks/_python`, and the same script overwrote that file with `cp -f`. Because `cp -f` keeps the inode, a concurrent run read a half-written helper, interpreter discovery failed, and composition was skipped. Measured before the fix: one repo bootstrapped eight times in sequence gave eight clean runs, while twenty-four repos bootstrapped back to back left three broken and a fourth appeared within the hour.
+
+  Every user-level helper now stages beside its destination and renames over it, covering `_python`, `guard.py`, `session_bootstrap.py`, `statusline.py` and `agent-quota.py`. A reader sees a complete old file or a complete new one. Interpreter discovery runs once, before the deployment phase, so the run no longer executes a helper it is about to replace. The PowerShell half needed a second attempt: `File.Replace(temp, destination, $null)` is rejected by this runtime with `The path is empty`, and the surrounding function caught that and returned false, so the deployed helper silently kept its old content while every output reported success.
+
+- **`bootstrap.sh` no longer overwrites its own executing file.** Bash reads a script incrementally by byte offset, and the self-update used `cp -f`, which keeps the inode. After that line the shell resumed from a stale offset inside new content. A longer replacement produced 127 stray commands from a mid-content resume; a shorter one silently truncated the tail so the finalize step never ran. Exit status was 0 in both cases, and the session hook reports success on the return code alone. This fired on the first run after any release whose `bootstrap.sh` bytes changed, which has happened twelve times. The self-update now renames, which leaves the running shell on the old inode, and a failure exits non-zero instead of printing a warning.
+
+- **A skipped composition is now visible in the artifact it produces** ([#30](https://github.com/yzhao062/anywhere-agents/issues/30)). When composition was skipped, bootstrap wrote the verbatim upstream `AGENTS.md`, which is byte-identical to the upstream copy, so the broken state was indistinguishable from a healthy one. The ledger recorded `completed: true` and `pack verify` reported every pack deployed. The produced file now carries a comment naming the reason, the ledger records that reason, and `completed` is false when a configured passive pack was omitted. An explicit `rule_packs: []` opt-out stays byte-identical to upstream, because nothing was omitted; the layers are ordered rather than merged, so a project-local empty list clears an earlier tracked selection.
+
+- **`pack verify` reads the composed artifact instead of only config and lock state** ([#30](https://github.com/yzhao062/anywhere-agents/issues/30)). It reported `✅ deployed` for all five packs on a repo whose `AGENTS.md` contained none of them. Each passive pack is now confirmed present by its `rule-pack:<name>:begin` marker before being reported deployed, and reports `registered, not composed` otherwise. Passive and active are told apart by the lock entry's role, since an active skill pack deploys elsewhere and has no marker. The target path is derived from the manifest the composer uses rather than spelled as `AGENTS.md`, because a hardcoded literal is how the neighbouring #19 defect survived.
+
+- **The user-level lock wait scales with the number of waiters.** It was a fixed 30 seconds, so eight repos bootstrapped concurrently produced a `LockTimeout` and exit 10 on a run that was merely last in line. The wait now retries with doubling windows to a 900-second ceiling. A waiter that never gets the lock cannot erase the holder's PID sidecar, and a lock still held at the ceiling fails as before. A compose that exits zero now also asserts its output differs from the upstream input when a passive pack was configured, since nothing checked that a successful run had produced anything.
+
 ## [0.7.13] — 2026-08-14
 
 ### Fixed
