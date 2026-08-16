@@ -29,6 +29,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import unittest.mock
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
@@ -96,7 +98,13 @@ class OuterLockAcquireTests(_V2ManifestFixture):
         def _ctx(*_args, **_kwargs):
             yield None
 
-        with patch.object(locks, "acquire", side_effect=_ctx) as acquire, \
+        with patch.object(
+                locks,
+                "acquire_with_retry",
+                wraps=locks.acquire_with_retry,
+        ) as acquire_user, patch.object(
+                locks, "acquire", side_effect=_ctx,
+        ) as acquire, \
                 patch.object(
                     compose_packs, "_do_compose_v2", return_value=0
                 ) as inner:
@@ -115,12 +123,17 @@ class OuterLockAcquireTests(_V2ManifestFixture):
         self.assertEqual(len(set(called_paths)), 2)
         self.assertEqual(called_paths[0], locks.user_lock_path(Path.home()))
         self.assertEqual(called_paths[1], locks.repo_lock_path(self.root))
-        # Both calls use the documented 30-second default.
+        # The first retry window and the repo-lock wait both retain the
+        # documented 30-second timeout.
         for call in acquire.call_args_list:
             timeout = call.kwargs.get("timeout")
             if timeout is None and len(call.args) > 1:
                 timeout = call.args[1]
             self.assertEqual(timeout, 30)
+        acquire_user.assert_called_once_with(
+            locks.user_lock_path(Path.home()),
+            max_wait=locks.USER_LOCK_MAX_WAIT_SECONDS,
+        )
         # Inner composer was reached only after locks were held.
         inner.assert_called_once()
 
@@ -133,7 +146,9 @@ class OuterLockAcquireTests(_V2ManifestFixture):
         lock_path = self.root / "fake-user.lock"
         timeout_exc = locks.LockTimeout(lock_path, 30, holder_pid=12345)
 
-        with patch.object(locks, "acquire", side_effect=timeout_exc):
+        with patch.object(
+            locks, "acquire_with_retry", side_effect=timeout_exc,
+        ):
             rc, _out, err = _invoke(["--root", str(self.root)])
 
         self.assertEqual(rc, 10)
@@ -226,6 +241,86 @@ class OuterLockAcquireTests(_V2ManifestFixture):
         self.assertTrue(released["user"])
         self.assertTrue(released["repo"])
 
+
+class UserLockContentionTests(unittest.TestCase):
+    """The shared user lock drains queued composers and remains bounded."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.lock_path = Path(self.tmp.name).resolve() / "user.lock"
+
+    def test_several_queued_waiters_retry_and_complete(self) -> None:
+        waiter_count = 5
+        start_barrier = threading.Barrier(waiter_count + 1)
+        result_lock = threading.Lock()
+        completed: list[int] = []
+        errors: list[BaseException] = []
+        attempts = 0
+        original_acquire = locks.acquire
+
+        def counted_acquire(*args, **kwargs):
+            nonlocal attempts
+            with result_lock:
+                attempts += 1
+            return original_acquire(*args, **kwargs)
+
+        def waiter(index: int) -> None:
+            try:
+                start_barrier.wait(timeout=2)
+                with locks.acquire_with_retry(
+                    self.lock_path,
+                    initial_timeout=0.05,
+                    max_wait=3.0,
+                ):
+                    with result_lock:
+                        completed.append(index)
+                    time.sleep(0.03)
+            except BaseException as exc:
+                with result_lock:
+                    errors.append(exc)
+
+        threads = [
+            threading.Thread(target=waiter, args=(index,))
+            for index in range(waiter_count)
+        ]
+        with patch.object(locks, "acquire", side_effect=counted_acquire):
+            with original_acquire(self.lock_path, timeout=1.0):
+                for thread in threads:
+                    thread.start()
+                start_barrier.wait(timeout=2)
+                time.sleep(0.35)
+            for thread in threads:
+                thread.join(timeout=4)
+
+        self.assertFalse(
+            any(thread.is_alive() for thread in threads),
+            "queued lock waiters did not finish",
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(set(completed), set(range(waiter_count)))
+        self.assertGreater(
+            attempts,
+            waiter_count,
+            "contention did not exercise the retry path",
+        )
+
+    def test_stuck_holder_surfaces_at_total_ceiling(self) -> None:
+        started = time.monotonic()
+        with locks.acquire(self.lock_path, timeout=1.0):
+            with self.assertRaises(locks.LockTimeout) as ctx:
+                with locks.acquire_with_retry(
+                    self.lock_path,
+                    initial_timeout=0.05,
+                    max_wait=0.25,
+                ):
+                    self.fail("stuck lock unexpectedly acquired")
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(ctx.exception.path, self.lock_path)
+        self.assertEqual(ctx.exception.timeout, 0.25)
+        self.assertEqual(ctx.exception.holder_pid, os.getpid())
+        self.assertLess(elapsed, 1.5)
 
 class LockBypassTests(_V2ManifestFixture):
     """``--print-yaml`` is a stdout-only helper; it must not contend with
@@ -2334,6 +2429,103 @@ class TestComposeFlowWiresPhase8Helpers(unittest.TestCase):
 from packs import transaction as txn_mod  # noqa: E402
 from packs import state as state_mod  # noqa: E402
 from packs import uninstall as uninstall_mod  # noqa: E402
+
+
+class ComposeOutputInvariantTests(unittest.TestCase):
+    """Passive composition must produce bytes beyond the upstream input."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.user_home = self.root / "home"
+        self.user_home.mkdir()
+        self.upstream = "# upstream\n"
+        _write(self.root / ".agent-config" / "AGENTS.md", self.upstream)
+        self.selection = {"name": "test-pack", "ref": "bundled"}
+
+    def _run(self, pack: dict) -> tuple[int, str, MagicMock, MagicMock]:
+        out_buf, err_buf = io.StringIO(), io.StringIO()
+        with redirect_stdout(out_buf), redirect_stderr(err_buf), \
+                patch.object(
+                    compose_packs.config_mod,
+                    "resolved_for_project",
+                    return_value=[self.selection],
+                ), patch.object(
+                    compose_packs,
+                    "_process_selection",
+                    return_value=(pack, None),
+                ), patch.object(
+                    compose_packs.Path,
+                    "home",
+                    return_value=self.user_home,
+                ), patch.object(
+                    compose_packs.passive_mod,
+                    "handle_passive_entry",
+                    return_value=self.upstream,
+                ) as passive_handler, patch.object(
+                    compose_packs.dispatch,
+                    "dispatch_active",
+                ) as active_handler:
+            rc = compose_packs._do_compose_v2(
+                self.root,
+                {"version": 2, "packs": []},
+                no_cache=False,
+            )
+        return rc, err_buf.getvalue(), passive_handler, active_handler
+
+    def test_active_only_unchanged_agents_md_passes(self) -> None:
+        pack = {
+            "name": "test-pack",
+            "source": "bundled:aa",
+            "active": [
+                {
+                    "kind": "skill",
+                    "hosts": ["claude-code"],
+                    "files": [
+                        {
+                            "from": "skills/test/",
+                            "to": ".claude/skills/test/",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        rc, err, passive_handler, active_handler = self._run(pack)
+
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(
+            (self.root / "AGENTS.md").read_bytes(),
+            self.upstream.encode("utf-8"),
+        )
+        passive_handler.assert_not_called()
+        active_handler.assert_called_once()
+
+    def test_passive_pack_unchanged_agents_md_fails(self) -> None:
+        pack = {
+            "name": "test-pack",
+            "source": {
+                "repo": "https://github.com/example/test-pack",
+                "ref": "v1",
+            },
+            "passive": [
+                {
+                    "files": [
+                        {"from": "docs/rules.md", "to": "AGENTS.md"},
+                    ]
+                }
+            ],
+        }
+
+        rc, err, passive_handler, active_handler = self._run(pack)
+
+        self.assertEqual(rc, 1)
+        self.assertIn("byte-identical to upstream", err)
+        self.assertIn("test-pack", err)
+        passive_handler.assert_called_once()
+        active_handler.assert_not_called()
+        self.assertFalse((self.root / "AGENTS.md").exists())
 
 
 class TransactionDriftGateTests(unittest.TestCase):

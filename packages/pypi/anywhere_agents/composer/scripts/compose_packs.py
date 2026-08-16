@@ -1216,15 +1216,20 @@ def _compose_main(argv: list[str] | None = None) -> int:
     #     ``.agent-config/pack-state.json`` and inner transaction
     #     staging dir against any other composer in the same checkout.
     #
-    # Both default to a 30-second wait; a ``locks.LockTimeout`` from
-    # either is surfaced as exit 10 (matching the v0.4.0 uninstall
-    # contract for "could not acquire lock" so consumers see one
-    # consistent error code across pack-lifecycle entry points).
+    # The shared user lock retries with increasing windows for up to 15
+    # minutes so a session-start burst across many repos can drain. The
+    # repo lock retains its 30-second wait because only composers for this
+    # checkout contend on it. A ``locks.LockTimeout`` from either is
+    # surfaced as exit 10 (matching the v0.4.0 uninstall contract for
+    # "could not acquire lock").
     user_lock = locks.user_lock_path(Path.home())
     repo_lock = locks.repo_lock_path(root)
     try:
-        with locks.acquire(user_lock, timeout=30), locks.acquire(
-            repo_lock, timeout=30
+        with locks.acquire_with_retry(
+            user_lock,
+            max_wait=locks.USER_LOCK_MAX_WAIT_SECONDS,
+        ), locks.acquire(
+            repo_lock, timeout=locks.DEFAULT_TIMEOUT_SECONDS
         ):
             # v0.5.0 Phase 8 carry-forward B: reconcile orphan staging
             # dirs left behind by an earlier crashed compose. Runs
@@ -1768,6 +1773,11 @@ def _do_compose_v2(
         root=root,
         previous_pack_lock=previous_pack_lock,
     )
+    passive_pack_names = {
+        selection["name"]
+        for selection, pack, _archive, _recorded in resolved
+        if pack.get("passive")
+    }
     try:
         with txn_mod.Transaction(staging_dir, lock_path) as txn:
             for selection, pack, archive, recorded in resolved:
@@ -1826,6 +1836,13 @@ def _do_compose_v2(
                         outcomes[name] = f"updated -> {new_short}"
                 else:
                     outcomes[name] = "unchanged"
+
+            if passive_pack_names and composed_agents == upstream:
+                names = ", ".join(sorted(passive_pack_names))
+                raise ComposeError(
+                    "passive composition left AGENTS.md byte-identical "
+                    f"to upstream for configured pack(s): {names}"
+                )
 
             # v0.5.8: update historical sha rings before saving pack-lock so
             # future compose runs can recognise on-disk files written by prior

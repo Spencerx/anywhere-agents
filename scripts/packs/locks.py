@@ -11,12 +11,14 @@ The composer acquires two locks during every lifecycle operation
   serializes access to project-local state. Uncontended across sessions
   in different consumer repos.
 
-Both locks surface the same ``LockTimeout`` on contention after the
-30-second default. The holder PID is recorded inside the lock file on
-acquire so ``LockTimeout`` can name the holder when available; on Windows
-the holder PID cannot always be proven (``msvcrt.locking`` gives no
-portable holder query), in which case reconciliation treats the lock as
-busy-advisory per pack-architecture.md § "Pack lifecycle operations".
+The per-repo lock surfaces ``LockTimeout`` after the 30-second default.
+The shared per-user lock uses retry windows up to a 15-minute total wait
+so a normal queue of consumer-repo composers can drain. The holder PID is
+recorded inside the lock file on acquire so ``LockTimeout`` can name the
+holder when available; on Windows the holder PID cannot always be proven
+(``msvcrt.locking`` gives no portable holder query), in which case
+reconciliation treats the lock as busy-advisory per pack-architecture.md
+§ "Pack lifecycle operations".
 
 Lock release happens when the file descriptor closes, which is guaranteed
 by the context manager on normal exit and by OS cleanup on process exit
@@ -37,6 +39,12 @@ from typing import IO, Iterator
 # composer's normal lifecycle operation and short enough to surface a
 # stuck lock as an actionable error.
 DEFAULT_TIMEOUT_SECONDS = 30.0
+
+# User-level state is shared by every consumer repo. Session-start bursts
+# can queue all 24 repos on one workstation, so allow 24 normal 30-second
+# turns plus 25 percent margin. A genuinely stuck holder still surfaces
+# after this finite ceiling.
+USER_LOCK_MAX_WAIT_SECONDS = 15.0 * 60.0
 
 # Polling interval while waiting for the lock. Short enough to feel
 # responsive on a workstation; long enough not to spin CPU.
@@ -188,9 +196,11 @@ def acquire(
     except FileNotFoundError:
         fh = open(path, "w+", encoding="utf-8")
 
+    acquired = False
     try:
         while True:
             if _try_lock_fd(fh.fileno()):
+                acquired = True
                 break
             if time.monotonic() >= deadline:
                 holder = _read_holder_pid(path)
@@ -212,18 +222,70 @@ def acquire(
 
         yield fh
     finally:
-        # Clear the sidecar before releasing the lock so a racing peer
-        # doesn't read a stale PID between release and next acquire.
-        sidecar = _pid_sidecar_for(path)
-        try:
-            sidecar.unlink()
-        except OSError:
-            pass
-        _release_lock_fd(fh.fileno())
+        # Only the holder may clear the PID sidecar. A waiter whose attempt
+        # times out must leave the current holder's identity intact for the
+        # next retry and the eventual LockTimeout report.
+        if acquired:
+            sidecar = _pid_sidecar_for(path)
+            try:
+                sidecar.unlink()
+            except OSError:
+                pass
+            _release_lock_fd(fh.fileno())
         try:
             fh.close()
         except OSError:
             pass
+
+
+@contextmanager
+def acquire_with_retry(
+    path: Path,
+    *,
+    initial_timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    max_wait: float = USER_LOCK_MAX_WAIT_SECONDS,
+    backoff_factor: float = 2.0,
+) -> Iterator[IO[str]]:
+    """Acquire ``path`` with bounded, increasing retry windows.
+
+    Each attempt uses :func:`acquire`, preserving the same exclusive lock,
+    polling, PID sidecar, and cleanup behavior. The first attempt waits
+    ``initial_timeout`` seconds. Later attempts double their window up to
+    the remaining portion of ``max_wait``. If the total ceiling expires,
+    raise one ``LockTimeout`` that reports the full wait and the last
+    holder PID observed.
+    """
+    if initial_timeout <= 0:
+        raise ValueError("initial_timeout must be greater than zero")
+    if max_wait <= 0:
+        raise ValueError("max_wait must be greater than zero")
+    if backoff_factor <= 1:
+        raise ValueError("backoff_factor must be greater than one")
+
+    deadline = time.monotonic() + max_wait
+    attempt_timeout = min(initial_timeout, max_wait)
+    holder_pid: int | None = None
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise LockTimeout(path, max_wait, holder_pid)
+
+        manager = acquire(path, timeout=min(attempt_timeout, remaining))
+        try:
+            fh = manager.__enter__()
+        except LockTimeout as exc:
+            holder_pid = exc.holder_pid
+            if time.monotonic() >= deadline:
+                raise LockTimeout(path, max_wait, holder_pid) from exc
+            attempt_timeout = min(attempt_timeout * backoff_factor, max_wait)
+            continue
+        break
+
+    try:
+        yield fh
+    finally:
+        manager.__exit__(None, None, None)
 
 
 def is_held(path: Path) -> bool:
