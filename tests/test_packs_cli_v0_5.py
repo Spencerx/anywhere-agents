@@ -817,7 +817,13 @@ class PackVerifyTests(unittest.TestCase):
         return lock_path
 
     @staticmethod
-    def _lock_entry(source_url: str, ref: str, output_paths: list[str]) -> dict:
+    def _lock_entry(
+        source_url: str,
+        ref: str,
+        output_paths: list[str],
+        *,
+        role: str | None = None,
+    ) -> dict:
         """Build a composer-shape pack-lock entry.
 
         Mirrors the structure written by ``scripts/packs/dispatch.py``
@@ -825,12 +831,26 @@ class PackVerifyTests(unittest.TestCase):
         entries carry ``output_paths``). Tests use this helper so a
         change in the lock schema only updates one place.
         """
+        file_entry = {"output_paths": list(output_paths)}
+        if role is not None:
+            file_entry.update({
+                "role": role,
+                "host": None if role == "passive" else "claude-code",
+                "source_path": (
+                    "docs/rule-pack-compact.md"
+                    if role == "passive"
+                    else "skills/fixture"
+                ),
+                "input_sha256": "abc",
+                "output_scope": "project-local",
+                "effective_update_policy": "locked",
+            })
         return {
             "source_url": source_url,
             "requested_ref": ref,
             "resolved_commit": ref or "",
             "pack_update_policy": "locked",
-            "files": [{"output_paths": list(output_paths)}],
+            "files": [file_entry],
         }
 
     @staticmethod
@@ -1392,11 +1412,13 @@ class PackVerifyTests(unittest.TestCase):
                         "https://github.com/yzhao062/agent-style",
                         BUNDLED_AGENT_STYLE_REF,
                         ["AGENTS.md"],
+                        role="passive",
                     ),
                     "aa-core-skills": self._lock_entry(
                         "bundled:aa",
                         "bundled",
                         [".claude/skills/implement-review/"],
+                        role="active-skill",
                     ),
                     "profile": {
                         "source_url": url,
@@ -1420,6 +1442,173 @@ class PackVerifyTests(unittest.TestCase):
                 os.chdir(cwd_before)
             self.assertEqual(rc, 0, f"stdout:\n{out_buf.getvalue()}\nstderr:\n{err_buf.getvalue()}")
             self.assertIn("deployed", out_buf.getvalue())
+
+    def test_verify_passive_markers_present_and_active_pack_unaffected(self) -> None:
+        from anywhere_agents.cli import _pack_verify
+        import argparse
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            self._write_default_manifest(project)
+            ref = "ab" * 20
+            url = "https://github.com/owner/agent-pack"
+            self._write_project(project, [
+                {"name": "profile", "source": {"url": url, "ref": ref}},
+                {"name": "acad-skills", "source": {"url": url, "ref": ref}},
+            ])
+            (project / "AGENTS.md").write_text(
+                "# upstream\n"
+                "<!-- rule-pack:agent-style:begin version=x sha256=y -->\n"
+                "style rules\n"
+                "<!-- rule-pack:agent-style:end -->\n"
+                "<!-- rule-pack:profile:begin version=x sha256=y -->\n"
+                "profile rules\n"
+                "<!-- rule-pack:profile:end -->\n",
+                encoding="utf-8",
+            )
+            self._create_output_files(
+                project,
+                [
+                    ".claude/skills/implement-review/SKILL.md",
+                    ".claude/skills/acad/SKILL.md",
+                ],
+            )
+            self._write_lock(project, {
+                "packs": {
+                    "agent-style": self._lock_entry(
+                        "https://github.com/yzhao062/agent-style",
+                        BUNDLED_AGENT_STYLE_REF,
+                        ["AGENTS.md"],
+                        role="passive",
+                    ),
+                    "aa-core-skills": self._lock_entry(
+                        "bundled:aa",
+                        "bundled",
+                        [".claude/skills/implement-review/SKILL.md"],
+                        role="active-skill",
+                    ),
+                    "profile": self._lock_entry(
+                        url,
+                        ref,
+                        ["AGENTS.md"],
+                        role="passive",
+                    ),
+                    "acad-skills": self._lock_entry(
+                        url,
+                        ref,
+                        [".claude/skills/acad/SKILL.md"],
+                        role="active-skill",
+                    ),
+                }
+            })
+            out_buf = io.StringIO()
+            with patch(
+                "anywhere_agents.cli._ls_remote_head",
+                return_value=None,
+            ), redirect_stdout(out_buf):
+                rc = _pack_verify(
+                    pathlib.Path(d) / "user-config.yaml",
+                    project,
+                    argparse.Namespace(fix=False, yes=False),
+                )
+            output = out_buf.getvalue()
+            self.assertEqual(rc, 0, f"output:\n{output}")
+            self.assertNotIn("registered, not composed", output)
+            self.assertIn("acad-skills", output)
+            self.assertIn("deployed", output)
+
+    def test_verify_passive_pack_missing_marker_exits_1(self) -> None:
+        from anywhere_agents.cli import _pack_verify
+        import argparse
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            self._write_default_manifest(project)
+            self._materialize_default_outputs(project)
+            ref = "ab" * 20
+            url = "https://github.com/owner/agent-pack"
+            self._write_project(project, [
+                {"name": "profile", "source": {"url": url, "ref": ref}},
+            ])
+            self._write_lock(project, {
+                "packs": {
+                    "agent-style": self._lock_entry(
+                        "https://github.com/yzhao062/agent-style",
+                        BUNDLED_AGENT_STYLE_REF,
+                        ["AGENTS.md"],
+                        role="passive",
+                    ),
+                    "aa-core-skills": self._lock_entry(
+                        "bundled:aa",
+                        "bundled",
+                        [".claude/skills/implement-review/"],
+                        role="active-skill",
+                    ),
+                    "profile": self._lock_entry(
+                        url,
+                        ref,
+                        ["AGENTS.md"],
+                        role="passive",
+                    ),
+                }
+            })
+            out_buf = io.StringIO()
+            with patch(
+                "anywhere_agents.cli._ls_remote_head",
+                return_value=None,
+            ), redirect_stdout(out_buf):
+                rc = _pack_verify(
+                    pathlib.Path(d) / "user-config.yaml",
+                    project,
+                    argparse.Namespace(fix=False, yes=False),
+                )
+            output = out_buf.getvalue()
+            self.assertEqual(rc, 1, f"output:\n{output}")
+            self.assertIn("profile", output)
+            self.assertIn("registered, not composed", output)
+            self.assertIn("anywhere-agents", output)
+
+    def test_verify_missing_composed_target_is_broken_not_not_composed(self) -> None:
+        from anywhere_agents.cli import _pack_verify
+        import argparse
+        with tempfile.TemporaryDirectory() as d:
+            project = pathlib.Path(d) / "project"
+            project.mkdir()
+            self._write_default_manifest(project)
+            skill = project / ".claude" / "skills" / "implement-review"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("skill\n", encoding="utf-8")
+            self._write_lock(project, {
+                "packs": {
+                    "agent-style": self._lock_entry(
+                        "https://github.com/yzhao062/agent-style",
+                        BUNDLED_AGENT_STYLE_REF,
+                        ["AGENTS.md"],
+                        role="passive",
+                    ),
+                    "aa-core-skills": self._lock_entry(
+                        "bundled:aa",
+                        "bundled",
+                        [".claude/skills/implement-review/"],
+                        role="active-skill",
+                    ),
+                }
+            })
+            out_buf = io.StringIO()
+            with patch(
+                "anywhere_agents.cli._ls_remote_head",
+                return_value=None,
+            ), redirect_stdout(out_buf):
+                rc = _pack_verify(
+                    pathlib.Path(d) / "user-config.yaml",
+                    project,
+                    argparse.Namespace(fix=False, yes=False),
+                )
+            output = out_buf.getvalue()
+            self.assertEqual(rc, 1, f"output:\n{output}")
+            self.assertIn("broken state", output)
+            self.assertIn("missing: AGENTS.md", output)
+            self.assertNotIn("registered, not composed", output)
 
     def test_verify_user_level_only_exits_1(self) -> None:
         from anywhere_agents.cli import _pack_main

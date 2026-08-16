@@ -1602,6 +1602,7 @@ def _pack_list_drift() -> int:
 # State labels — kept stable for test assertions and tooling integration.
 _VERIFY_STATE_DEPLOYED = "deployed"
 _VERIFY_STATE_DEPLOYED_NOT_LOCKED = "deployed, not locked"
+_VERIFY_STATE_REGISTERED_NOT_COMPOSED = "registered, not composed"
 _VERIFY_STATE_BUNDLED_DRIFT = "bundled default updated"
 _VERIFY_STATE_USER_ONLY = "user-level only"
 _VERIFY_STATE_MISMATCH = "config mismatch"
@@ -1614,6 +1615,7 @@ _VERIFY_STATE_ORPHAN = "orphan"
 _STATE_GLYPHS = {
     _VERIFY_STATE_DEPLOYED: "✅",       # ✅
     _VERIFY_STATE_DEPLOYED_NOT_LOCKED: "⚠",
+    _VERIFY_STATE_REGISTERED_NOT_COMPOSED: "⚠",
     _VERIFY_STATE_BUNDLED_DRIFT: "⚠",
     _VERIFY_STATE_USER_ONLY: "⚠",      # ⚠
     _VERIFY_STATE_MISMATCH: "\U0001f500",   # 🔀
@@ -2119,6 +2121,126 @@ def _load_lock_observations(project_root: Path):
         else:
             health[name] = "ok"
     return identities, health
+
+
+def _composer_passive_output_paths(project_root: Path) -> set[str]:
+    """Return passive targets declared by the composer's manifest."""
+    for manifest in (
+        _bundled_packs_yaml_path(),
+        _project_clone_packs_yaml_path(project_root),
+    ):
+        if manifest is None or not manifest.exists():
+            continue
+        try:
+            data = _read_yaml_or_none(manifest) or {}
+        except _VerifyParseError:
+            continue
+        packs = data.get("packs") if isinstance(data, dict) else None
+        if not isinstance(packs, list):
+            continue
+        targets = set()
+        for pack in packs:
+            if not isinstance(pack, dict):
+                continue
+            passive = pack.get("passive") or []
+            if not isinstance(passive, list):
+                continue
+            for entry in passive:
+                files = entry.get("files") if isinstance(entry, dict) else None
+                if not isinstance(files, list):
+                    continue
+                for mapping in files:
+                    target = mapping.get("to") if isinstance(mapping, dict) else None
+                    if isinstance(target, str) and target:
+                        targets.add(target)
+        if targets:
+            return targets
+    return set()
+
+
+def _annotate_composed_rows(rows, project_root: Path):
+    """Confirm composer markers for deployed passive pack outputs.
+
+    Composer-written lock file entries carry the resolved manifest role
+    and output paths. Use those fields so active packs are excluded. The
+    composer's manifest supplies the valid passive targets, avoiding a
+    verifier-side filename literal and stale synthetic lock metadata.
+    """
+    lock_path = project_root / ".agent-config" / "pack-lock.json"
+    if not lock_path.exists():
+        return rows
+    import json
+    try:
+        data = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return rows
+    packs = data.get("packs") if isinstance(data, dict) else None
+    if not isinstance(packs, dict):
+        return rows
+    composed_targets = _composer_passive_output_paths(project_root)
+    if not composed_targets:
+        return rows
+
+    for row in rows:
+        if row.get("state") != _VERIFY_STATE_DEPLOYED:
+            continue
+        body = packs.get(row.get("name"))
+        files = body.get("files") if isinstance(body, dict) else None
+        if not isinstance(files, list):
+            continue
+        targets: list[str] = []
+        for file_entry in files:
+            if (
+                not isinstance(file_entry, dict)
+                or file_entry.get("role") != "passive"
+            ):
+                continue
+            for output_path in file_entry.get("output_paths") or []:
+                if (
+                    isinstance(output_path, str)
+                    and output_path in composed_targets
+                    and output_path not in targets
+                ):
+                    targets.append(output_path)
+        if not targets:
+            continue
+
+        missing_targets = []
+        markerless_targets = []
+        unreadable_target = None
+        marker = re.compile(
+            r"<!--\s*rule-pack:"
+            + re.escape(row["name"])
+            + r":begin(?:\s|>)"
+        )
+        for output_path in targets:
+            target = project_root / output_path
+            try:
+                content = target.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                missing_targets.append(output_path)
+                continue
+            except (OSError, UnicodeError) as exc:
+                unreadable_target = (output_path, exc)
+                break
+            if marker.search(content) is None:
+                markerless_targets.append(output_path)
+
+        if missing_targets:
+            row["state"] = _VERIFY_STATE_BROKEN
+            row["missing_paths"] = missing_targets
+            row["note"] = "composed target is missing"
+        elif unreadable_target is not None:
+            output_path, exc = unreadable_target
+            row["state"] = _VERIFY_STATE_BROKEN
+            row["note"] = f"cannot read composed target {output_path}: {exc}"
+        elif markerless_targets:
+            row["state"] = _VERIFY_STATE_REGISTERED_NOT_COMPOSED
+            row["note"] = (
+                "composer marker is absent from "
+                + ", ".join(markerless_targets)
+            )
+    return rows
 
 
 def _default_pack_expected_outputs(project_root: Path, name: str) -> list[str]:
@@ -2771,6 +2893,11 @@ def _print_verify_table(rows, env_var_value, file=None):
                 f"{'':<{name_w}}    hint: edit agent-config.yaml, then rerun bootstrap",
                 file=file,
             )
+        elif state == _VERIFY_STATE_REGISTERED_NOT_COMPOSED:
+            print(
+                f"{'':<{name_w}}    hint: run `anywhere-agents` to recompose",
+                file=file,
+            )
         elif state == _VERIFY_STATE_ORPHAN:
             print(
                 f"{'':<{name_w}}    hint: restore a rule_packs: entry, OR run",
@@ -2806,6 +2933,7 @@ def _verify_gather(user_config_path, project_root):
     project = _load_project_observations(project_root)
     lock_idents, lock_health = _load_lock_observations(project_root)
     rows = _classify_pack_states(user, project, lock_idents, lock_health)
+    rows = _annotate_composed_rows(rows, project_root)
     rows = _annotate_default_rows(rows, project_root)
     env_var_value = os.environ.get("AGENT_CONFIG_PACKS", "")
     return rows, env_var_value
@@ -3202,6 +3330,7 @@ def _pack_verify_fix(user_config_path, project_root, args):
             if r["state"] in (
                 _VERIFY_STATE_DECLARED,
                 _VERIFY_STATE_DEPLOYED_NOT_LOCKED,
+                _VERIFY_STATE_REGISTERED_NOT_COMPOSED,
                 _VERIFY_STATE_MISSING,
                 _VERIFY_STATE_BUNDLED_DRIFT,
             )
