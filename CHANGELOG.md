@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Version tags apply uniformly to the repo content **and** the matching `anywhere-agents` PyPI / npm packages — they share one release stream. Consumers pinned to a specific tag get a stable snapshot; consumers on `main` receive ongoing updates.
 
-## [0.7.15] — 2026-08-17
+## [0.7.15] — 2026-08-18
 
 ### Fixed
 
@@ -54,6 +54,12 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
   The root-type check had to name `System.Management.Automation.PSCustomObject` in full. The `[pscustomobject]` accelerator resolves to `PSObject`, which wraps every value, so `'hello' -is [pscustomobject]` is true on both editions and `[1,2] -is [pscustomobject]` is true on 5.1. Written with the accelerator the check passed everything through, and an array or string root came back rewritten. Five refusal shapes are asserted byte-for-byte through the shipped call-site statements with no interpreter available, and the `~/.claude.json` heal is asserted the same way.
 
   A nonzero exit from the helper is no longer read as permission to run the in-shell merge over the same bytes. `Invoke-SettingsMerge` returned `$false` for every failure, and the call site reads `$false` as "the helper was unavailable". A target the helper had read and refused was therefore handed to a second implementation. Measured: a target holding `{` came back as one newline under Windows PowerShell 5.1 and as `null` under PowerShell 7. A target holding an invalid UTF-8 byte came back with `U+FFFD`. Both runs reported success. The Bash entry point never read the exit code, so it left all of them alone, and returning `$true` whenever the helper ran is what makes the two agree. Four refusal shapes are asserted byte-for-byte under both editions.
+
+- **The user-config layer no longer depends on a variable the environment can override.** `_user_config_path` in `bootstrap.sh` picked the Windows branch from `$OSTYPE` alone. Bash sets that variable with `set_if_not`, so a value already exported in the environment survives, and a GitHub Windows runner exports one that does not read `msys`. Every case of the layer-path table then took the POSIX branch on a Windows host, and a consumer whose environment carries an inherited `OSTYPE` would read `$XDG_CONFIG_HOME` where the resolver reads `%APPDATA%`. The branch now also counts `$SYSTEMROOT` or `$WINDIR` as Windows: Windows sets both, and neither is present on Linux, on macOS, or under WSL, where the POSIX answer is the correct one. Measured across four shapes under Git Bash, including a spoofed `OSTYPE=linux-gnu`.
+
+- **`check-parity.sh` gained `--aa-internal-only`, the mode its own test needs.** The self-comparison guard added earlier in this release refuses a run whose two roots resolve to one tree. The wheel-mirror block is the one block a single checkout can answer, and CI checks `anywhere-agents` out with no sibling `agent-config` to compare against, so its test named the same tree twice and the guard refused it. The flag runs that block and silences every cross-repo block, rather than printing an answer about one tree compared with itself. An accidental self-comparison still exits 2.
+
+- **The test suite runs again off Windows and on Python 3.9.** Two defects in this release's own test changes took every non-Windows job and every 3.9 job down. `powershell_stub_dir` returned a subdirectory that only the Windows branch of the stub writers creates, so `pwsh` on Linux and macOS received a PATH entry that does not exist: the git preflight failed, and forty-six tests either asserted against a bootstrap that refused to start or read an `AGENTS.md` it never wrote. Separately, seven callers passed `newline=` to `Path.write_text`, a keyword that arrived in 3.10 while the suite still supports 3.9. A shared `_write_text_lf` helper writes shell input for all of them.
 
 ### Changed
 

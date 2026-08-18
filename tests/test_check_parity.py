@@ -252,11 +252,12 @@ class AaInternalStrictBlockTests(unittest.TestCase):
             )
 
     def _run_script(self) -> subprocess.CompletedProcess:
-        # Pass the aa root explicitly so the cross-repo block has a target;
-        # the aa-internal block uses AA_ROOT (which is also REPO_ROOT here)
-        # plus the wheel-mirror subpath.
+        # --aa-internal-only, because this block is the only one a single
+        # checkout can answer. Naming the aa root without the flag points both
+        # roots at one tree, and the script refuses that as the vacuous
+        # self-comparison it is; CI has no sibling agent-config to offer.
         return subprocess.run(
-            [self.bash, str(self.SCRIPT), str(REPO_ROOT)],
+            [self.bash, str(self.SCRIPT), "--aa-internal-only", str(REPO_ROOT)],
             capture_output=True,
             text=True,
             cwd=str(REPO_ROOT),
