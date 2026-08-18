@@ -14,6 +14,12 @@ import urllib.error
 from pathlib import Path
 from unittest import mock
 
+# tests/ is on sys.path under `unittest discover -s tests` but not under
+# `python -m unittest tests.<module>`, which validate.yml uses for the
+# Sentinel redaction smoke. Put it there before the sibling import.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _quiet_spawn  # noqa: E402,F401  installs a windowless spawn default on Windows
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -1043,16 +1049,30 @@ class PowerShellPythonProbeTests(unittest.TestCase):
         import re
 
         text = self.BOOTSTRAP_PS1.read_text(encoding="utf-8")
-        # The probe is single-quoted in PowerShell so the embedded Python
-        # string literals can use double quotes:
-        #   & $PythonPath -c 'import sys; sys.stdout.write("...")'
+        # Accept either quoting, then check which one is in use. The probe is
+        # double-quoted in PowerShell with single quotes around the embedded
+        # Python string literals:
+        #   & $PythonPath -c "import sys; sys.stdout.write('...')"
+        # The reverse nesting is the anywhere-agents#34 defect: Windows
+        # PowerShell 5.1 does not escape a double quote when it rebuilds the
+        # native command line, so Python receives a truncated program. Running
+        # the extracted expression through subprocess cannot see that, because
+        # subprocess never goes through PowerShell. Only the text of the
+        # argument reveals it here; the live check across both PowerShell
+        # editions lives in tests/test_bootstrap_preflight.py.
         match = re.search(
-            r"-c\s+'([^']*import sys[^']*sys\.stdout\.write[^']*)'", text
+            r"-c\s+(['\"])(.*?import sys.*?sys\.stdout\.write.*?)\1", text
         )
         self.assertIsNotNone(
             match, "bootstrap.ps1 must contain a Test-PythonRuns probe command"
         )
-        expr = match.group(1)
+        expr = match.group(2)
+        self.assertNotIn(
+            '"',
+            expr,
+            f"PS1 python-probe expression {expr!r} must contain no double "
+            f"quote; Windows PowerShell 5.1 passes it to Python unescaped",
+        )
         result = subprocess.run(
             [sys.executable, "-c", expr],
             capture_output=True,

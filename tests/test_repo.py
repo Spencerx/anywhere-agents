@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import shutil
@@ -9,6 +10,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+# tests/ is on sys.path under `unittest discover -s tests` but not under
+# `python -m unittest tests.<module>`, which validate.yml uses for the
+# Sentinel redaction smoke. Put it there before the sibling import.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _quiet_spawn  # noqa: E402,F401  installs a windowless spawn default on Windows
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,10 +53,13 @@ def extract_fenced_block(text: str, language: str) -> str:
     return match.group(1)
 
 
-def run_command(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+def run_command(
+    command: list[str], cwd: Path, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         cwd=cwd,
+        env=env,
         text=True,
         capture_output=True,
         check=False,
@@ -181,6 +191,16 @@ class RepoValidationTests(unittest.TestCase):
         steps = ledger["steps"]
         phases = [step["phase"] for step in steps]
         self.assertIs(ledger["completed"], True)
+        # The fixture supplies an interpreter explicitly, so failing to find
+        # one is a bootstrap defect rather than a property of the machine.
+        # anywhere-agents#34 produced exactly this reason on Windows
+        # PowerShell 5.1 while this test stayed green.
+        compose_step = next(step for step in steps if step["phase"] == "compose")
+        self.assertNotEqual(
+            compose_step.get("reason"), "no Python 3 interpreter found"
+        )
+        generate_step = next(step for step in steps if step["phase"] == "generate")
+        self.assertEqual(generate_step["status"], "ok")
         self.assertEqual(ledger["last_phase"], "finalize")
         self.assertEqual(len(steps), 8)
         self.assertEqual(
@@ -326,7 +346,10 @@ class RepoValidationTests(unittest.TestCase):
             "```bash",
             "curl -sfL https://raw.githubusercontent.com/yzhao062/anywhere-agents/main/bootstrap/bootstrap.sh -o .agent-config/bootstrap.sh",
             "bash .agent-config/bootstrap.sh",
-            "refreshes the consuming repo's root `AGENTS.md`",
+            "rewrites the consuming repo's root `AGENTS.md`",
+            # The preservation rule contradicts a plain "always overwritten"
+            # reading, so the block has to state it where a consumer will see it.
+            "an existing composed `AGENTS.md` is preserved",
             "AGENTS.local.md",
             ".claude/settings.json",
             "effortLevel",
@@ -344,15 +367,17 @@ class RepoValidationTests(unittest.TestCase):
             "Copy-Item .agent-config/repo/.claude/settings.json .claude/settings.json -Force",
             "ConvertFrom-Json",
             "Add-Member",
-            "Add-Content -Path .gitignore -Value \"`n.agent-config/\"",
+            r"Add-GitignoreEntry '^\/?\.agent-config/' '.agent-config/'",
             "curl -sfL \"https://raw.githubusercontent.com/$UPSTREAM/main/AGENTS.md\" -o .agent-config/AGENTS.md",
             "cp -f .agent-config/AGENTS.md AGENTS.md",
             "cp -f .agent-config/repo/.claude/commands/*.md .claude/commands/",
             "cp -f .agent-config/repo/.claude/settings.json .claude/settings.json",
-            "dict.fromkeys",
+            # The deep merge moved into the shared scripts/merge_settings.py that
+            # both entry points now call, so pin the call rather than the algorithm.
+            "scripts/merge_settings.py",
             "Merge-Json",
             "git -C .agent-config/repo sparse-checkout set skills .claude scripts user",
-            "echo '.agent-config/' >> .gitignore",
+            r"_gitignore_add '^\/?\.agent-config/' '.agent-config/'",
         ]
         bootstrap_text = self.bootstrap_powershell_text + "\n" + self.bootstrap_bash_text
         for fragment in required_fragments:
@@ -608,9 +633,13 @@ class RepoValidationTests(unittest.TestCase):
             project_dir = self.prepare_project_dir(base_dir)
             script = self.render_powershell_smoke_script(remote_dir)
 
+            env = os.environ.copy()
+            env["ANYWHERE_AGENTS_PYTHON"] = sys.executable
+
             first_run = run_command(
                 [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
                 project_dir,
+                env,
             )
             self.assert_command_ok(first_run, "first PowerShell bootstrap run")
 
@@ -623,6 +652,7 @@ class RepoValidationTests(unittest.TestCase):
             second_run = run_command(
                 [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
                 project_dir,
+                env,
             )
             self.assert_command_ok(second_run, "second PowerShell bootstrap run")
 
@@ -640,7 +670,9 @@ class RepoValidationTests(unittest.TestCase):
             project_dir = self.prepare_project_dir(base_dir)
             script = self.render_bash_smoke_script(remote_dir)
 
-            first_run = run_command([shell, "-lc", script], project_dir)
+            env = os.environ.copy()
+            env["ANYWHERE_AGENTS_PYTHON"] = sys.executable
+            first_run = run_command([shell, "-lc", script], project_dir, env)
             self.assert_command_ok(first_run, "first bash bootstrap run")
 
             ps = project_dir / ".claude" / "settings.json"
@@ -649,7 +681,7 @@ class RepoValidationTests(unittest.TestCase):
             data.setdefault("permissions", {}).setdefault("allow", []).append("Bash(project-only:*)")
             ps.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
-            second_run = run_command([shell, "-lc", script], project_dir)
+            second_run = run_command([shell, "-lc", script], project_dir, env)
             self.assert_command_ok(second_run, "second bash bootstrap run")
 
             self.verify_bootstrap_result(project_dir)

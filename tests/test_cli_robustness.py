@@ -21,6 +21,12 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch, call, MagicMock
 
+# tests/ is on sys.path under `unittest discover -s tests` but not under
+# `python -m unittest tests.<module>`, which validate.yml uses for the
+# Sentinel redaction smoke. Put it there before the sibling import.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _quiet_spawn  # noqa: E402,F401  installs a windowless spawn default on Windows
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "packages" / "pypi"))
 sys.path.insert(0, str(ROOT / "scripts"))
