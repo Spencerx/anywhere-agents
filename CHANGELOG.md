@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Version tags apply uniformly to the repo content **and** the matching `anywhere-agents` PyPI / npm packages — they share one release stream. Consumers pinned to a specific tag get a stable snapshot; consumers on `main` receive ongoing updates.
 
+## [0.7.17] — 2026-08-22
+
+### Fixed
+
+- **A stopped background task is no longer read as a failed review.** `/implement-review` dispatches the reviewer as a background task and read the harness's task notification as the round's outcome. A notification carrying `killed`, summarized as `Background command "..." was stopped`, describes the harness's task wrapper. The reviewer is spawned detached, so it outlives that wrapper and keeps writing to the same inherited handles.
+
+  Six such notifications arrived on 2026-08-21 across two repositories, and in all six the reviewer was still running: dispatch output still growing minutes later, review files published up to sixteen minutes after the stop. One session read two of them as consecutive dispatch failures, set sticky downgrade for the rest of the session, and stopped. The review it was waiting for landed ten minutes later, complete, carrying a `BLOCK` verdict, and was never read.
+
+  `skills/implement-review/scripts/await-review.py` resolves the round from state-directory evidence instead. It returns `REVIEW-READY` (0), `ALIVE` (3), or `DEAD` (4), plus two non-sticky checkpoints for a person at exit 2: `TIMEOUT` when the round outlived its deadline, and `REAP-UNKNOWN` when a stream death never produced its reap-completion marker. Only `DEAD` counts as an Auto-terminal runtime failure. Replayed against the three real state directories from that day, it returns `REVIEW-READY` for all three.
+
+  Silence stays non-terminal, which is the property the whole script exists to preserve. `DEAD` requires a stream death whose identity-checked reap completed, because a quiet tail proves nothing and `stall-watch` already treats ten minutes of it as a soft signal. A review published under another round's marker is reported and left to the deadline, since a reviewer can publish twice in one round and the second write is the one worth having.
+
+  The round's bound is a file rather than a value in the calling agent's context, which does not survive the stop this change is about. `<state-dir>/round-deadline` is stamped once with an exclusive create, at the round's origin plus 60 minutes, and read back on every later call. The origin is the earliest readable timestamp in the directory: a successful redispatch archives attempt N and rewrites the root `timestamp`, so deriving from the root afterwards hands the round the time attempt 1 already spent. A replay measured 840 seconds of extension without that correction.
+
+  Both `auto-watch` variants now require `stream-reap-complete` before emitting `STREAM-DEAD`, because that output costs the session its channel and the death marker alone is written before the reap runs. Each stall watcher can also lose the completion write and never retry it, so a marker more than 30 seconds old without its proof now yields `REAP-UNKNOWN` rather than an hour of waiting. Both watchers take the dispatcher's already-printed state directory through `IMPLEMENT_REVIEW_STATE_DIR`, keeping the round off a 30-second discovery window that a contended process launch can miss; discovery remains the fallback.
+
+  Six review rounds went into this; the sixth returned `PASS`. Twenty-three mutation rows each turn a named test red, including one that restores the original defect.
+
+- **A dispatched reviewer no longer spends its first shell spawns on the session banner.** Pairing every exec line in one review's state-directory tail with the runner verdict that followed it showed three of the round's twelve shell spawns going to the session-start banner: read the version cache, read both package manifests, read `AGENTS.local.md`, read the router skill, count the skills. The round reached its first actual review command on the twelfth attempt.
+
+  The child was following the rules correctly. `AGENTS.md` states that the banner procedure overrides skill-first and task-first behavior, and the dispatched `developer_instructions` named only bootstrap and shared-configuration refresh. They now name the banner too. Nobody reads a dispatched child's terminal, so those spawns buy nothing, and on the machine in that report process creation was already failing intermittently with `STATUS_DLL_INIT_FAILED`.
+
+- **A hook that inherits an open stdin no longer hangs the test suite.** `tests/test_session_bootstrap.py` let `session_bootstrap.py` inherit the test process's stdin, and the hook reads stdin to find the SessionStart payload's `source`. A handle that never reaches EOF makes that read block until the subprocess timeout fires.
+
+  The failure looked like machine contention for two releases, because interactively the parent's stdin was already at EOF and the module finished in about 3 seconds. Run detached with nothing else on the machine, it took 634 seconds: seven timeouts at 90 seconds each and no slowness at all. A timing failure landing on an exact multiple of the timeout is a hang wearing a slowdown's clothes. The helper now passes `stdin=subprocess.DEVNULL`, which is what "no payload" should have meant, and the same detached run takes 5 seconds.
+
+### Changed
+
+- **`implement-review` states three rules a round used to fail without.** An Auto-terminal round is bounded by the calling agent's turn and the child writes its review once at the end, so a background dispatch that outlives the turn leaves no review while the dispatcher still exits 0. A bare `git diff --cached` over a broad staging area is charged to the child's context and can exhaust it outright. Both are now stated where a reader meets them before the decision they inform.
+
+  Phase 1b gains a soft splitting rule: one pass is the default, split only when no shared contract crosses the boundary, and re-read that boundary while consolidating rather than assuming independence held. It also names which backends can honor a scoped diff command and states that the Claude backend cannot. The effort ratchet names its own cost: `xhigh` is the floor, and raising a round to `max` requires raising the per-tier timeout with it, 20 minutes at `xhigh` and 45 at `max`, against the Windows 600000 ceiling.
+
+  `tests/test_skill_md_contract.py` moves three defects this loop produced repeatedly into the suite: a renumbered list left a duplicate item, a cross-reference stayed at the pre-insertion number, and the prompt template's hard-coded diff command was replaced in one place while four siblings kept the old form. The document is scanned once into an offset-preserving prose mask plus explicit fence spans, after four earlier drafts were each defeated on the round following the one that wrote them.
+
+- **Two watcher test modules wait for their own evidence instead of sleeping.** One `stall-watch` test failed on both repositories on a single push, on `windows-latest . py3.12` only, and both went green on a rerun of that job with no code change. A local run then produced a third member of the family. Neither file needed a new idiom: `test_stall_watch.py` already had a `_wait_for` helper at eight call sites with three waits that had never adopted it, and `test_dispatch_codex.py` already had an inline deadline loop with one wait that had not.
+
+  Green runs got faster, because a deadline loop leaves when the event arrives while a sleep always pays in full: 5.0s to 3.9s on the threshold test, 10.0s to 6.3s on the growth test. The fifth conversion is the one worth reading. A mid-transcript check slept and then asserted that no `stream-death` file had appeared, which is a false green: a watcher that never polled during the window satisfies that assertion without the classifier ever being asked. It now waits for a second `STALL` line, which is reachable only past the stream-death check.
+
 ## [0.7.16] — 2026-08-18
 
 ### Added
@@ -1150,7 +1188,9 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.15...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.17...HEAD
+[0.7.17]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.16...v0.7.17
+[0.7.16]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.15...v0.7.16
 [0.7.15]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.14...v0.7.15
 [0.7.14]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.13...v0.7.14
 [0.7.13]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.12...v0.7.13
