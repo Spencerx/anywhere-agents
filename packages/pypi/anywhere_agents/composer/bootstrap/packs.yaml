@@ -30,7 +30,7 @@ packs:
       Core skills bundled with anywhere-agents. Ships the five
       shipped-skill directories (implement-review, my-router,
       ci-mockup-figure, readme-polish, prun) plus their .claude/commands/
-      pointer files. The pointer files remain in the aa source tree
+      pointer files, and the vet.md alias pointer for implement-review. The pointer files remain in the aa source tree
       during v0.4.0 (see pack-architecture.md § "Pack-emitted command
       pointers") and are pack-emitted to consumer's .claude/commands/
       alongside the skill directories.
@@ -43,6 +43,8 @@ packs:
             to: .claude/skills/implement-review/
           - from: .claude/commands/implement-review.md
             to: .claude/commands/implement-review.md
+          - from: .claude/commands/vet.md
+            to: .claude/commands/vet.md
       - kind: skill
         files:
           - from: skills/my-router/

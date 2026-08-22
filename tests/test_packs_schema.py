@@ -62,6 +62,31 @@ class LegacyV1Tests(_TmpDirCase):
         self.assertIn("agent-style", names)
         self.assertIn("aa-core-skills", names)
 
+    def test_shipped_manifest_deploys_every_command_pointer(self) -> None:
+        """A pointer in the tree that no mapping names is never deployed.
+
+        The wheel's package data globs `.claude/commands/*.md`, so a new
+        pointer rides along inside the artifact and looks shipped. The
+        composer only writes what the manifest enumerates, though, and only
+        enumerated outputs are lock-owned and removed on uninstall. A pointer
+        added without a mapping therefore reaches consumers through the source
+        bootstrap's force-copy and never through the package, which is the gap
+        the `vet` alias fell into when it was first written.
+        """
+        shipped = ROOT / "bootstrap" / "packs.yaml"
+        parsed = schema.parse_manifest(shipped)
+        mapped = {
+            mapping["to"]
+            for pack in parsed["packs"]
+            for entry in pack.get("active", [])
+            for mapping in entry.get("files", [])
+        }
+        on_disk = sorted((ROOT / ".claude" / "commands").glob("*.md"))
+        self.assertGreater(len(on_disk), 0, "no command pointers found")
+        for pointer in on_disk:
+            with self.subTest(pointer=pointer.name):
+                self.assertIn(f".claude/commands/{pointer.name}", mapped)
+
     def test_legacy_missing_source_rejects(self) -> None:
         path = _write_manifest(
             self.root,
