@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Version tags apply uniformly to the repo content **and** the matching `anywhere-agents` PyPI / npm packages — they share one release stream. Consumers pinned to a specific tag get a stable snapshot; consumers on `main` receive ongoing updates.
 
+## [0.7.18] — 2026-08-22
+
+### Added
+
+- **`/vet` is a short alias for `implement-review`.** The skill is the one typed most often and its name is long. Renaming it was rejected on measurement. The name appears 680 times in the source repo and 503 times here. It is also carried by 26 consumer repositories as a deployed copy, and by both published packages. The `IMPLEMENT_REVIEW_*` environment variables and the dispatch state-directory prefix that `auto-watch` globs for carry it too. The deciding constraint is different: nothing prunes a skill directory that vanishes upstream. Removal happens only through an explicit `pack uninstall`. A rename would therefore strand the old name deployed in every consumer, still answering the old slash command, with content frozen at the release before the rename.
+
+  A pointer costs none of that. `.claude/commands/vet.md` declares `alias-of: implement-review` in its frontmatter and names the target skill's three lookup paths. Both the Claude Code slash surface and the documented lookup order then resolve the same `SKILL.md`. The canonical name does not move.
+
+  The pointer contract learned what an alias is, and learned it narrowly. `tests/test_pointer_files.py` reads the target from the leading frontmatter block only. An `alias-of:` line in the body is not a declaration, because honouring one would let a sentence silently reassign which skill a pointer resolves. Duplicate keys raise rather than pick a winner. Every pointer, canonical or alias, must resolve a skill that exists, so neither kind can dangle after a rename. `vet` is additionally pinned to `implement-review` by name: the generic rules all still pass if an alias is quietly repointed with its lookup line changed to match. `tests/test_repo.py` asked for exact skill-to-pointer equality, which forbids a second pointer outright. It now asks that every skill keep a canonical pointer, and validates lookup text per skill.
+
+  Delivery needed its own fix. The wheel's package data globs `.claude/commands/*.md`, so a new pointer rides along inside the artifact and looks shipped. The composer writes only what the manifest enumerates, though, and only enumerated outputs are lock-owned and removed on uninstall. An unmapped pointer therefore reaches consumers through the source bootstrap's force-copy and never through the package. Both `bootstrap/packs.yaml` copies now map `vet.md`, and `.claude/commands/vet.md` joined the aa-internal STRICT list in both parity scripts. `test_shipped_manifest_deploys_every_command_pointer` asserts that every pointer on disk has a mapping, so the next one cannot fall into the same gap.
+
 ## [0.7.17] — 2026-08-22
 
 ### Fixed
@@ -1188,7 +1200,8 @@ Initial public release. The sanitized downstream of the author's private daily-d
 - **Medium** — README / CHANGELOG / hero overstated the guard hook's scope by listing `rm -rf` alongside Git/GitHub commands. Corrected to distinguish guard-covered commands from settings-based permission prompts.
 - **Low** — Trailing whitespace in `AGENTS.md`; `docs/hero.html` external avatar URL (vendored to `docs/avatar.jpg` for reproducibility). Both fixed.
 
-[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.17...HEAD
+[Unreleased]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.18...HEAD
+[0.7.18]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.17...v0.7.18
 [0.7.17]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.16...v0.7.17
 [0.7.16]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.15...v0.7.16
 [0.7.15]: https://github.com/yzhao062/anywhere-agents/compare/v0.7.14...v0.7.15
