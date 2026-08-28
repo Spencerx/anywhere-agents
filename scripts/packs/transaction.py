@@ -93,6 +93,48 @@ def _sha256_of_path(path: Path) -> str | None:
         return None
 
 
+def _target_already_holds(target: Path, op: dict[str, Any]) -> bool:
+    """Return True when ``target`` already holds this op's new content.
+
+    An op whose staged bytes equal the bytes already on disk is a rename
+    that changes nothing, and ``commit`` skips it. Two reasons, one of them
+    measured.
+
+    The measured one: on Windows a rename over a file another process holds
+    open without ``FILE_SHARE_DELETE`` is refused, and a shell holds a
+    script open for as long as it is executing it. A stranded journal from
+    a live consumer recorded 102 write ops of which 102 had equal pre-state
+    and new-content hashes, and the op that aborted the whole transaction
+    targeted a skill script a running worker was executing. Not rewriting
+    an identical file removes that collision for every long-running script
+    at once, the ones known today and the ones added later. It does not
+    remove the collision when the content genuinely changed; that case
+    needs the holder to stop holding the deployed path (see #43).
+
+    The ordinary one: rewriting a file with its own bytes is work nobody
+    asked for, and it resets the target's mtime and permissions every run.
+
+    The check lives here rather than in ``stage_write`` on purpose. The op
+    has to stay queued: the v0.5.2 drift gate walks ``self.ops`` and would
+    stop seeing a target that was never queued, ``_validate_prestate``
+    records unmanaged-file adoptions from that same walk, and a handler may
+    queue several writes to one target (``handlers/permission.py``) where
+    only the last one carries the answer. Comparing at apply time also sees
+    what earlier ops in this same commit already wrote.
+
+    A journal written before this field existed, or a target that cannot be
+    read, returns False and takes the ordinary replace path, where a real
+    error surfaces as itself rather than as a silent skip.
+    """
+    expected = op.get("new_content_sha256")
+    if not expected:
+        return False
+    try:
+        return _sha256_of_path(target) == expected
+    except OSError:
+        return False
+
+
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
     """Write ``data`` to ``path`` via temp file + ``os.replace``."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -532,6 +574,8 @@ class Transaction:
         if kind == OP_WRITE:
             target = Path(op["target_path"])
             staged = Path(op["staged_path"])
+            if _target_already_holds(target, op):
+                return
             target.parent.mkdir(parents=True, exist_ok=True)
             _atomic_replace(str(staged), str(target))
         elif kind == OP_DELETE:
@@ -546,8 +590,11 @@ class Transaction:
             old_path = Path(op["old_path"])
             new_path = Path(op["new_path"])
             staged = Path(op["staged_path"])
-            new_path.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_replace(str(staged), str(new_path))
+            # Only the rename half is skippable here. A restamp still has
+            # to delete the old path, or the pack ships under both names.
+            if not _target_already_holds(new_path, op):
+                new_path.parent.mkdir(parents=True, exist_ok=True)
+                _atomic_replace(str(staged), str(new_path))
             try:
                 old_path.unlink()
             except FileNotFoundError:

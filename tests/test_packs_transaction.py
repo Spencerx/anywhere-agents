@@ -230,5 +230,119 @@ class AtomicReplaceRetryTests(_TmpDirCase):
             transaction.os.replace = real_replace
 
 
+class IdenticalWriteSkipTests(_TmpDirCase):
+    """A staged write whose bytes already match the target is skipped at
+    apply time, so a target that another process holds open cannot abort a
+    transaction that was not going to change it (anywhere-agents#44).
+
+    These tests patch ``transaction._atomic_replace`` rather than
+    ``os.replace``. It is the narrower seam: ``_apply_op`` looks the helper
+    up as a module global, and patching ``os`` would swap a builtin for
+    every other thread in the process. The retry loop inside the helper has
+    its own coverage in :class:`AtomicReplaceRetryTests`.
+    """
+
+    def _record_replacements(self) -> list[str]:
+        """Patch the replace helper to record each destination it is asked
+        to write, and return the list it appends to."""
+        seen: list[str] = []
+        real = transaction._atomic_replace
+
+        def recording(src, dst):  # type: ignore[no-untyped-def]
+            seen.append(str(dst))
+            return real(src, dst)
+
+        transaction._atomic_replace = recording
+        self.addCleanup(setattr, transaction, "_atomic_replace", real)
+        return seen
+
+    def _deny_replacements_to(self, denied: Path) -> None:
+        """Patch the replace helper so any rename onto ``denied`` fails the
+        way Windows fails one whose destination is held open."""
+        real = transaction._atomic_replace
+
+        def denying(src, dst):  # type: ignore[no-untyped-def]
+            if str(dst) == str(denied):
+                raise PermissionError(5, "Access is denied")
+            return real(src, dst)
+
+        transaction._atomic_replace = denying
+        self.addCleanup(setattr, transaction, "_atomic_replace", real)
+
+    def test_identical_write_is_not_renamed(self) -> None:
+        target = self.root / "out.txt"
+        target.write_bytes(b"same")
+        staging = self.root / "stage.staging-skip"
+        seen = self._record_replacements()
+        with transaction.Transaction(staging, self.lock_path) as txn:
+            txn.stage_write(target, b"same")
+        self.assertEqual(target.read_bytes(), b"same")
+        self.assertNotIn(str(target), seen)
+
+    def test_changed_write_is_still_renamed(self) -> None:
+        target = self.root / "out.txt"
+        target.write_bytes(b"old")
+        staging = self.root / "stage.staging-write"
+        seen = self._record_replacements()
+        with transaction.Transaction(staging, self.lock_path) as txn:
+            txn.stage_write(target, b"new")
+        self.assertEqual(target.read_bytes(), b"new")
+        self.assertIn(str(target), seen)
+
+    def test_write_to_a_missing_target_is_still_renamed(self) -> None:
+        """No target means nothing to compare against, so the op applies."""
+        target = self.root / "nested" / "fresh.txt"
+        staging = self.root / "stage.staging-fresh"
+        seen = self._record_replacements()
+        with transaction.Transaction(staging, self.lock_path) as txn:
+            txn.stage_write(target, b"body")
+        self.assertEqual(target.read_bytes(), b"body")
+        self.assertIn(str(target), seen)
+
+    def test_identical_write_survives_a_held_target(self) -> None:
+        """The regression this change exists for. A worker executing a
+        deployed script holds it open for minutes, and the rename over it
+        used to abort every op queued behind it."""
+        held = self.root / "dispatch-task.sh"
+        held.write_bytes(b"script body")
+        later = self.root / "queued-behind.txt"
+        staging = self.root / "stage.staging-held"
+        self._deny_replacements_to(held)
+        with transaction.Transaction(staging, self.lock_path) as txn:
+            txn.stage_write(held, b"script body")
+            txn.stage_write(later, b"reached")
+        self.assertEqual(held.read_bytes(), b"script body")
+        self.assertEqual(later.read_bytes(), b"reached")
+
+    def test_changed_write_to_a_held_target_still_aborts(self) -> None:
+        """The skip is not a general "ignore a locked file" rule. Content
+        that genuinely changed and cannot land has to fail loudly: the lock
+        file records the hash the compose intended, so a quiet skip would
+        leave it describing bytes that are not on disk."""
+        held = self.root / "dispatch-task.sh"
+        held.write_bytes(b"old script")
+        staging = self.root / "stage.staging-held-changed"
+        self._deny_replacements_to(held)
+        with self.assertRaises(transaction.TransactionError):
+            with transaction.Transaction(staging, self.lock_path) as txn:
+                txn.stage_write(held, b"new script")
+        self.assertEqual(held.read_bytes(), b"old script")
+
+    def test_restamp_with_matching_new_path_still_removes_old(self) -> None:
+        """Only the rename half of a restamp is skippable. Skipping the
+        unlink too would leave the hook deployed under both prefixes."""
+        old_path = self.root / "01-hook.py"
+        new_path = self.root / "02-hook.py"
+        old_path.write_bytes(b"body")
+        new_path.write_bytes(b"body")
+        staging = self.root / "stage.staging-restamp"
+        seen = self._record_replacements()
+        with transaction.Transaction(staging, self.lock_path) as txn:
+            txn.stage_restamp(old_path, new_path, b"body")
+        self.assertFalse(old_path.exists())
+        self.assertEqual(new_path.read_bytes(), b"body")
+        self.assertNotIn(str(new_path), seen)
+
+
 if __name__ == "__main__":
     unittest.main()
