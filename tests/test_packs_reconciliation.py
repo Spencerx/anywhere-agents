@@ -123,6 +123,50 @@ class PartialTests(_TmpDirCase):
         result = reconciliation.classify_orphan(staging)
         self.assertEqual(result.label, reconciliation.PARTIAL)
 
+    def test_skipped_identical_write_then_failed_op_is_partial(self) -> None:
+        """The identical-write skip in _apply_op depends on this classification.
+
+        A skipped op leaves its target already at new state. If a later op then
+        fails, the orphan has to read as PARTIAL, so recovery reapplies only the
+        op that did not land and leaves the skipped one alone. Were the skipped
+        op to read as pre_state instead, the whole transaction would look like a
+        clean rollback and recovery would undo work that was already correct."""
+        same = self.root / "same.txt"
+        later = self.root / "later.txt"
+        same.write_bytes(b"identical")
+        later.write_bytes(b"later-pre")
+        staging = self.root / "stage.staging-skip-partial"
+        txn = txn_mod.Transaction(staging, self.lock_path)
+        txn.__enter__()
+        txn.stage_write(same, b"identical")
+        txn.stage_write(later, b"later-new")
+        result = reconciliation.classify_orphan(staging)
+        self.assertEqual(result.label, reconciliation.PARTIAL)
+        self.assertEqual([op.on_disk_state for op in result.ops],
+                         ["new_state", "pre_state"])
+
+    def test_skipped_restamp_rename_then_failed_op_is_partial(self) -> None:
+        """Same invariant for the restamp branch, where only the rename half is
+        skipped and the unlink of the old path still runs."""
+        old_path = self.root / "01-hook.py"
+        new_path = self.root / "02-hook.py"
+        later = self.root / "later.txt"
+        old_path.write_bytes(b"body")
+        new_path.write_bytes(b"body")
+        later.write_bytes(b"later-pre")
+        staging = self.root / "stage.staging-restamp-partial"
+        txn = txn_mod.Transaction(staging, self.lock_path)
+        txn.__enter__()
+        txn.stage_restamp(old_path, new_path, b"body")
+        txn.stage_write(later, b"later-new")
+        # Apply only the restamp the way _apply_op now does: the rename is
+        # skipped because new_path already holds those bytes, the unlink is not.
+        old_path.unlink()
+        result = reconciliation.classify_orphan(staging)
+        self.assertEqual(result.label, reconciliation.PARTIAL)
+        self.assertEqual([op.on_disk_state for op in result.ops],
+                         ["new_state", "pre_state"])
+
 
 class MalformedTests(_TmpDirCase):
     def test_missing_journal_is_malformed(self) -> None:
