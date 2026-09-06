@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Version tags apply uniformly to the repo content **and** the matching `anywhere-agents` PyPI / npm packages — they share one release stream. Consumers pinned to a specific tag get a stable snapshot; consumers on `main` receive ongoing updates.
 
+## [Unreleased]
+
+### Added
+
+- **`editable-figure` joins the shipped skill set, taking `aa-core-skills` from five skills to six.** It designs a paper, proposal, or README figure and delivers a PowerPoint source whose text, shapes, and connectors the author can still edit. The workflow is analyze, find references, design for one takeaway, build native objects, inspect in context. It covers the editorial decisions only. The authoring runtime comes from whatever presentation tooling the session already has, so the skill does not depend on one model or one desktop plugin.
+
+  It sits beside `ci-mockup-figure` rather than replacing it. That skill captures HTML and code-native figures as images. This one keeps the delivered artifact editable, which matters when a co-author has to change a label six months later and no longer has the builder. `my-router` routes an explicit PowerPoint or editability request here, ahead of the generic figure and README routes. An explicit HTML, TikZ, screenshot, or prompt-only request keeps the format it asked for.
+
+  Three inspection checks are kept separate because they fail independently. Meaning is traced back to the source. Rendering and occupied space are measured at the real publication width. Editability is verified by moving a connected node on a disposable copy; a shape count or a PNG preview establishes none of it.
+
+  **It is the first shipped skill that cannot finish everywhere, and the constraint is a capability check rather than an operating-system gate.** Authoring is not the limit: `python-pptx` and PptxGenJS both write native objects headlessly. Validation is. Nothing on a Linux server, container, or CI job can confirm the file opens, renders, and edits as intended, and that check is what separates a real editable figure from a flattened image. It needs desktop PowerPoint, so Windows or macOS. The bundled `scripts/render_powerpoint.ps1` narrows further, since Windows COM automation has no macOS equivalent.
+
+  The check therefore lives at invocation, in the skill body, rather than in the pack manifest. `hosts:` selects an agent, not an operating system, and no platform key exists to add. An OS test would also pass on a Mac with no PowerPoint installed, which is the state that actually breaks the workflow. Deployment stays host-scoped and the skill refuses the build itself.
+
+  Discovery surfaces carry the caveat so a consumer meets it before invoking: the `description` frontmatter the router reads, the four package and repository READMEs, the pack description, the docs-page admonition, and the router's own rules. A session without the capability explains the limit and offers `ci-mockup-figure`, which covers that case through headless Chrome, TikZ, and skia-canvas. It never silently substitutes an image for a requested PPTX.
+
+  **It ships byte-identical to its `agent-config` original, opinions included.** The skill names three specific papers as the source of its default palette, and three selected figures from the maintainer's awarded proposals as style exemplars, with locators that resolve only on their machine. A sanitized variant was built during this change and then reverted. The palette preference is the content rather than an accident of authorship, and a consumer without the referenced proposals simply has no locator to open, which the exemplar file already accounts for. Dropping the locators bought nothing and cost a permanent BY-DESIGN split plus a manual re-sanitization pass before every future release. `scripts/check-parity.sh` therefore lists `skills/editable-figure` under STRICT with the other four shared skills. `skills/my-router` stays the sole BY-DESIGN skill, because its two copies route to genuinely different skill inventories.
+
+  Fork it and change the palette if you want your own. `references/default-palette.json` is self-contained and holds the exact values the skill reads.
+
 ## [0.7.18] — 2026-08-22
 
 ### Added

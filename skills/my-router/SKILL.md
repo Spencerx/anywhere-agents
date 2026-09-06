@@ -9,7 +9,7 @@ description: Context-aware router that detects work type and dispatches to the r
 
 A routing layer that sits between the outer workflow (e.g., `superpowers` brainstorm/plan/execute/verify) and domain skills. The router reads the working directory, file types, and user prompt to decide which skill to invoke, so the user does not need to remember skill names.
 
-In this repo's shipped form, the routing table has concrete entries for the five shipped skills (`implement-review`, `ci-mockup-figure`, `readme-polish`, `my-router` itself, and `prun` for explicit parallel fan-out intent). It is also designed as a **pattern you extend**. A fork of this repo edits `references/routing-table.md` directly. A consuming project, where that file is overwritten on every bootstrap, instead registers its own skills in a bootstrap-proof local file (`routing-table.local.md` at the repo root, or a `## Routing` section in `AGENTS.local.md`); the router reads those rows and dispatches to them. See [Extending the Router](#extending-the-router).
+In this repo's shipped form, the routing table has concrete entries for the six shipped skills (`implement-review`, `ci-mockup-figure`, `readme-polish`, `editable-figure`, `my-router` itself, and `prun` for explicit parallel fan-out intent). It is also designed as a **pattern you extend**. A fork of this repo edits `references/routing-table.md` directly. A consuming project, where that file is overwritten on every bootstrap, instead registers its own skills in a bootstrap-proof local file (`routing-table.local.md` at the repo root, or a `## Routing` section in `AGENTS.local.md`); the router reads those rows and dispatches to them. See [Extending the Router](#extending-the-router).
 
 ## When to Use Superpowers vs. Direct Dispatch
 
@@ -36,13 +36,15 @@ At dispatch time, the router checks three signals in order (keywords, file types
 
 ### 1. Prompt keywords (highest priority)
 
-The user's prompt often contains the clearest signal. The shipped routing table includes keyword entries for `implement-review`, `ci-mockup-figure`, and `readme-polish`. Add entries for your own skills in your fork's `references/routing-table.md`, or, in a consuming project, in a bootstrap-proof local file (see [Extending the Router](#extending-the-router)).
+The user's prompt often contains the clearest signal. The shipped routing table includes keyword entries for `implement-review`, `ci-mockup-figure`, `readme-polish`, and `editable-figure`. Add entries for your own skills in your fork's `references/routing-table.md`, or, in a consuming project, in a bootstrap-proof local file (see [Extending the Router](#extending-the-router)).
+
+When a figure request explicitly asks for PowerPoint or native editability, take the `editable-figure` route ahead of the generic figure, README-polish, or slide routes. A request to simplify an existing editable figure stays on that route. An explicit HTML mockup, TikZ, screenshot, or prompt-only request keeps its requested format. Before taking that route, check that the session can perform the desktop PowerPoint validation `editable-figure` requires. If it cannot, explain the limitation and offer `ci-mockup-figure` only when its output fits the request. Do not silently substitute HTML for an explicitly requested PPTX.
 
 See [`references/routing-table.md`](references/routing-table.md) for the current table and the extension template.
 
 ### 2. File types in working directory
 
-If prompt keywords are ambiguous, inspect the files being worked on. The shipped router recognizes staged git changes → `implement-review`, HTML mockup files for dashboards/timelines → `ci-mockup-figure`, and a top-level `README.md` flagged for polish → `readme-polish`. Add your own file-type rules when you add new skills.
+If prompt keywords are ambiguous, inspect the files being worked on. The shipped router recognizes staged git changes → `implement-review`, HTML mockup files for dashboards/timelines → `ci-mockup-figure`, a top-level `README.md` flagged for polish → `readme-polish`, and `.pptx` figure sources beside a paper, proposal, or README → `editable-figure`. Add your own file-type rules when you add new skills.
 
 ### 3. Project structure hints
 

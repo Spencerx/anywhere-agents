@@ -99,6 +99,18 @@ nav:
       - Copyable patterns: skills/references/patterns.md
       - Audit checklist: skills/references/checklist.md
     - prun: skills/prun.md
+    - editable-figure:
+      - skills/editable-figure.md
+      - Document contexts: skills/references/document-contexts.md
+      - Reference search: skills/references/reference-search.md
+      - Proposal figures: skills/references/proposal-figures.md
+      - Proposal style exemplars: skills/references/proposal-style-exemplars.md
+      - Default palette: skills/references/default-palette.md
+      - Space efficiency: skills/references/space-efficiency.md
+      - Mechanism figures: skills/references/mechanism-figures.md
+      - Panels and results: skills/references/panels-and-results.md
+      - Iteration example: skills/references/iteration-example.md
+      - Native PowerPoint: skills/references/native-powerpoint.md
   - AGENTS.md Reference: agents-md.md
   - FAQ: faq.md
   - Changelog: changelog.md
