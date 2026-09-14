@@ -40,7 +40,7 @@
 
     ---
 
-    Parallel delegation fan-out where a Claude session coordinates Sonnet and Agy workers. Codex is reserved for `/vet`; fan-out width follows the task instead of a fixed small cap.
+    Parallel delegation fan-out where a Claude session coordinates Agy workers. No Claude subagents run units, and Codex is reserved for `/vet`; fan-out width follows the task instead of a fixed small cap.
 
     [:octicons-arrow-right-24: Deep docs](prun.md)
 

@@ -9,6 +9,10 @@ Version tags apply uniformly to the repo content **and** the matching `anywhere-
 
 ## [Unreleased]
 
+### Changed
+
+- **`prun` runs every unit on Agy and no longer spawns Claude subagents.** Since v0.8.0, Sonnet subagents took the units that needed session tools and were the fallback when the Agy pool ran short. A Sonnet subagent bills the same Claude account the coordinating session runs on, so a wide fan-out drew down the coordinator's own quota, and a unit could spawn further agents of its own. The skill now forbids Agent-tool subagents and Workflow agents for a unit, including as a fallback: the unit waits for Agy capacity or the user is told. The coordinator gathers what a unit needs from session tools before dispatch, and a task that needs those tools throughout is not a `prun` task. The pointer, routing rows, both READMEs and the docs pages say the same; `tests/test_prun_executors.py` checks the executor table, key skill and wrapper text, current README descriptions, and public prun summaries.
+
 ### Fixed
 
 - **A quota-stopped `prun` Agy unit no longer publishes its opening narration as the result** (#54). `dispatch-task-agy.py` read only the final `result` event's `response` and branched on the process exit code. Agy exits 0 when it stops on a quota limit, and that `ERROR` event still carries the model's opening narration. Four units of one 2026-09-11 fan-out therefore published narration as their deliverable, with no `FALLBACK` header. The event's `status` now decides the outcome: anything other than `SUCCESS` fails the unit and carries the backend `error` into the `FALLBACK` result. A worker that had already written its own result keeps that file, and the run still exits non-zero. Both monitors read only the first line, so they would otherwise report the unit `done`. Older Agy builds that omit `status` keep working, because a missing field counts as success. `dispatch-gemini.py` carried the same defect: a quota stop would have published narration as the round's review. It now rejects a non-`SUCCESS` status the same way.

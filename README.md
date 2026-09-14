@@ -109,7 +109,7 @@ Set `IMPLEMENT_REVIEW_DEFAULT_CHANNEL=auto` in your user-level Claude Code envir
 
 Without the user-level Auto-terminal default, add the channel once: `/vet auto agy`. The Agy backend authenticates through the installed `agy` CLI and the Google AI plan attached to it; it does not require a separate Gemini API key. It reviews an isolated export of the staged Git index with `accept-edits` and unattended tool approval, so it can run real experiments while generated artifacts stay out of the source checkout. It publishes `Review-Antigravity.md` atomically. Override the model only when needed with `ANTIGRAVITY_DISPATCH_MODEL`; override effort with `ANTIGRAVITY_DISPATCH_EFFORT`.
 
-`/prun` uses a different cost split: Sonnet takes the units that need session tools, and Agy takes the larger share of the rest, running unattended in a scratch directory or throwaway clone with follow-up turns while slower units finish. Codex is deliberately excluded from bulk fan-out and reserved for `/vet`. Agy units use the same Gemini 3.8 Flash High / `high` default, and the coordinator chooses as many independent units as the task supports rather than imposing a two- or three-worker cap.
+`/prun` uses a different cost split: every unit runs on Agy, unattended in a scratch directory or throwaway clone with follow-up turns while slower units finish. It spawns no Claude subagents, because those bill the same Claude account the coordinating session runs on. Codex is deliberately excluded from bulk fan-out and reserved for `/vet`. Agy units use the same Gemini 3.8 Flash High / `high` default, and the coordinator chooses as many independent units as the task supports rather than imposing a two- or three-worker cap.
 
 ### One `AGENTS.md`, Rules for Every Agent
 
@@ -389,7 +389,7 @@ anywhere-agents/
 │   ├── editable-figure/           # native editable PowerPoint figures for papers, proposals, READMEs
 │   ├── implement-review/          # cross-model review loop with Phase 0 plan-review (signature skill)
 │   ├── my-router/                 # context-aware skill dispatcher
-│   ├── prun/                      # parallel fan-out across Sonnet/Agy workers
+│   ├── prun/                      # parallel fan-out across Agy workers
 │   └── readme-polish/             # audit + rewrite GitHub READMEs with modern patterns
 ├── packages/
 │   ├── pypi/                      # anywhere-agents PyPI CLI (pipx run anywhere-agents)
