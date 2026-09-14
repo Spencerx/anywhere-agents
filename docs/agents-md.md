@@ -36,7 +36,7 @@ When both are available, default to this division of labor.
 
 ## Task Routing
 
-Points at `my-router` for auto-dispatch. The router inspects prompt keywords, file types, and project structure to pick the right skill without asking.
+Points at `my-router` for auto-dispatch. The router inspects prompt keywords, file types, and project structure to pick the right skill without asking. Launching workers is different: a subagent fan-out or a Workflow run needs the user's authorization, which may have been given earlier in the session. A single helper agent for a bounded lookup needs none.
 
 ## Codex MCP Integration
 
