@@ -1,0 +1,58 @@
+# Guard Hook
+
+Bootstrap deploys `scripts/guard.py` to `~/.claude/hooks/guard.py` and wires it as a `PreToolUse` hook in `~/.claude/settings.json`. It runs before every tool call. `AGENTS.md` § "Git Safety and Mechanical Gates" holds the gate table and the escape hatches. The table says what each gate matches and whether it denies, asks, or advises. This page holds the reasoning behind each gate and the measurements that settled its shape.
+
+## Deny Where a Reroute Exists, Ask Where None Does
+
+The gates fall into two kinds. A gate whose trigger has an obvious rewrite denies, and the deny message carries a `Suggested rewrite:` line. An unattended agent (`/implement-review auto`, a headless `claude -p`, any loop nobody is watching) can then lift the reroute in one model turn instead of inferring it. The compound `cd` gate is the plain case: `cd <path> && git status` becomes `git -C <path> status`, and the message says so. A gate whose trigger has no agent-side reroute asks, because human approval is the contract: `git push`, `git commit`, `gh pr create`, `npm publish`, `rm -rf`. An `ask` stalls an unattended loop, which is the point for those operations and the reason the other gates do not use it. The 2026-08 noise audit that shipped in v0.7.0 set this criterion after measuring how often each gate fired in real sessions.
+
+## One Classifier for the Four Ask Rows
+
+The four `ask` rows are one classifier that runs for the `Bash` and `PowerShell` tools (a legacy payload without a tool name counts as Bash). It keys on the exact leading token of each sub-command after splitting on `;`, `&&`, `||`, and `|`, never on a substring scan, so `echo "rm -rf"` and `Write-Output "Remove-Item -Recurse"` pass. It strips transparent prefix runners (`sudo`, `doas`, `env`, `command`, `nohup`, `setsid`, an inline `VAR=VALUE`) and sees through the built-in wrappers that carry a command as an argument: `ssh`, `bash`/`sh`/`zsh -c`, `docker exec` and `docker run`, `pwsh`/`powershell -Command`, `cmd /c` and `/k`, `timeout`, `xargs`. Nesting is followed to `MAX_WRAPPER_DEPTH` and asked about beyond it.
+
+`python -c`, the low-frequency prefixes `nice`, `ionice`, `stdbuf`, and `time`, and any private wrapper (a personal job runner, say) are opaque by design. Their argument semantics are not inferable from the command text, and scanning arbitrary arguments for substrings would bring back the false-positive alarm fatigue the classifier exists to avoid. The user-level allow-list pairs `Bash(*)` with `PowerShell(*)`, so the native permission layer allows by default and this hook is the sole risk arbiter on both shells. No environment variable turns any of the four rows into pass-through. The advertised escape set lives in `guard.py` as `_ESCAPE_HATCH_ENV_NAMES`. A literal-scan test in `tests/test_guard.py` fails when a hook reads an env var that is not registered there, so a future gate cannot grow an unadvertised bypass.
+
+## Why the Style Advisory Reports and Does Not Block
+
+The banned-word gate denies because every hit has a one-word substitution, so an agent can reroute in a single turn. The mechanical agent-style rules have no such reroute. RULE-12 fires on any sentence over thirty words, which is a mechanical fix while an agent drafts and a judgement call while a person types. A gate that denied on it would be switched off within a day, so the advisory reports through the hook's JSON response and leaves the permission flow alone. Findings are capped at five with a count of the remainder, because a wall of them is one the reader learns to skip. The advisory runs only when the banned-word gate did not deny, so a blocked write produces one message rather than two, and it shares `AGENT_STYLE_HOOK` rather than adding an env var. A missing or broken `agent_style` package degrades silently, since the hook runs in every repository and most have no reason to carry the package.
+
+Two details were settled by measurement rather than by reading the docs. The findings travel in `hookSpecificOutput.additionalContext` and in `systemMessage`, because probing Claude Code 2.1.229 showed those reach the model and the user respectively, while stderr on an exit-0 hook reached neither. RULE-G, which asks for title-case headings, is left out. Over the 155 markdown files in the maintainer's source repo it produced 1018 of 2561 findings, and it flagged the sentence-case headings that corpus writes on purpose. It would have filled the cap with nothing to act on. The `style-review` skill still runs it, where a person asked for the full audit.
+
+## The `agent-io` Marker
+
+Both writing guards skip a path the caller marked as agent I/O. They pick their scope by file extension, and extension does not separate prose an agent is writing from text an agent is carrying. A scratch directory holds a dispatch prompt beside a draft proposal section. Measured across 34 local session transcripts, 23 percent of prose-extension writes landed in a scratch directory, and the most frequent names there belonged to the review loop itself (`ir-prompt-r1.txt`, `review-prompt-r1.txt`, `ir-round1.txt`). Findings on that text cannot be acted on. A dispatch prompt is an instruction to another agent, so rewriting it changes what was asked; captured round output is another agent's words, so rewriting it falsifies the record. The writer therefore declares the location by putting the file under a directory named `agent-io`.
+
+The two guards trust that marker to different depths. Anywhere on disk is enough for the advisory, matched case-insensitively and on either separator, because a wrong exemption there costs one message. Only a path under a temp root that encloses no repository satisfies the deny gate, resolved through symlinks first, because CI checks repositories out below temp directories routinely. A marker trusted anywhere would be a one-token bypass: an agent could write `repo/agent-io/proposal.md` and skip the banned-word check on real prose. Carried text belongs in the session scratch directory in any case, which is where `implement-review` and `prun` are documented to write it. An unmarked path is still scanned, so a forgotten marker costs noise instead of silence.
+
+## Why a Nested `git init` Is Denied
+
+The second repository is invisible from the first. The directory that holds it is normally an ignored one, so `git status` in the parent never mentions it again. IDEs are where it surfaces. PyCharm and VS Code both scan for nested `.git` directories and register each as a VCS root. Every file staged in one then appears in the changes view beside real work, separated only by a branch label. Measured on one machine, four review packets left in a proposal repo over a single day held 85 staged-and-never-committed files across four roots. The commit panel offered all of them under one checkbox. A mis-click there commits build artifacts into a repository shared with a co-author.
+
+It is a deny because the reroute exists and an unattended agent can take it in one turn. Artifacts an agent generates belong in the session scratch directory, which is already where the skills that carry text between agents write. The gate answers the question git would answer. It checks the executable before reading a subcommand, follows a global `-C`, resolves `..` and symlinks, and skips the values of options that take one. A deliberate inner repository, a submodule most often, sets `AGENT_NESTED_GIT_INIT_HOOK=off` for that one call. No shipped skill creates such a directory, which is why this is a gate rather than a correction to one (anywhere-agents#56).
+
+## Shapes the Gate Declines to Judge
+
+The nested-`git init` gate declines commands whose shape it cannot account for, and that is deliberate. A command carrying a heredoc is not judged at all. Its body is data that reads exactly like commands, and deciding where the body ends is where two separate defects lived. A single command carrying a redirection is not judged either, because its operands are not arguments, and reading one as the target denied a directory that never existed. A backslash or a backtick immediately before a quote declines the whole command. An escape moves where a quoted region ends, and the splitter and the tokenizer downstream both assume it does not. Recognizing it in one place would leave two others wrong. At a possible comment start, the gate declines as well when the boundary character before the `#` is itself preceded by either escape character. An escaped operator does not end a word. An escaped hash is not that shape, because an escape is not a boundary character. So `\#` stays the literal text a shell reads it as, and the command after the separator is still judged. Both escape checks ignore shell-specific escape rules and escape parity by design, so a doubled escape declines like a single one. A PowerShell block comment declines for the heredoc's reason, since its body spans lines.
+
+Five review rounds produced the rule: every widening of the parser closed one gap and opened a false positive somewhere adjacent. The two errors are not symmetric. A false positive blocks work an agent is entitled to do and no rewrite repairs it, while a declined command behaves exactly as it did before this gate existed. A `git init` reached through any of those shapes is not how the nested repositories that prompted the gate were created.
+
+## The Banner Gate
+
+The banner gate is the mechanical half of the Session Start Check. Its first arm denies every tool call except reads and the acknowledgement write while a session event is pending with no acknowledgement file. Its second arm passes a stale acknowledgement through with a `[banner-gate]` advisory, so a re-fire never blocks work (anywhere-agents#7). The event file, the acknowledgement file, the report the agent reads, and the acceptance rule are described in [Session banner](session-banner.md). Precomputing the banner did not retire the gate: precomputation does not guarantee visible emission, and removing enforcement while changing production would confound the measurement. The gate is revisited after the 2026-09 rollout with an eligible-session denominator.
+
+## Escape Hatches
+
+Each hatch is an env var in the `env` block of `~/.claude/settings.json`. The disable values are `off`, `0`, `disabled`, `false`, and `no`.
+
+| Env var | Disables |
+|---|---|
+| `AGENT_STYLE_HOOK` | The writing-style gate and its advisory |
+| `AGENT_COMPOUND_CD_HOOK` | The compound-`cd` gate |
+| `AGENT_NESTED_GIT_INIT_HOOK` | The nested-`git init` gate |
+| `AGENT_CONFIG_GATES` | The legacy blanket: writing style and the banner, nothing else |
+
+Set the narrowest one for a legitimate write that quotes a banned word as an example (a style guide, a CHANGELOG entry), and remove it after the write. None of them reaches the four `ask` rows.
+
+## Fan-Out Stays a Written Rule
+
+No gate enforces the Task Routing rule against unrequested subagents and Workflow runs, by design. Whether the user asked for parallel work is a judgement about the conversation, often made several turns before the launch. A hook that judged it wrong would block a fan-out the user requested. The rule exists because one unrequested fan-out on 2026-09-13 used a large share of a Claude five-hour window. If an agent fans out unasked again, the fix is sharper prose in the rule, not a hook.

@@ -382,6 +382,18 @@ def _bootstrap_main(argv: list[str]) -> int:
         else:
             os.environ[_ALIAS_NOTICE_SUPPRESS_ENV] = prior_internal
 
+    rc = _bootstrap_outcome(bootstrap_rc, fix_rc)
+    # The bootstrap script rendered the session banner report when it
+    # exited, before the heal pass above could change the pack state. Render
+    # again from the wheel's own copy so the report the next session reads
+    # describes the state this command leaves behind, including a project
+    # whose clone predates the renderer.
+    _render_banner_report(Path.cwd(), rc)
+    return rc
+
+
+def _bootstrap_outcome(bootstrap_rc: int, fix_rc: int) -> int:
+    """The exit code of a bootstrap run followed by the heal pass."""
     if bootstrap_rc != 0:
         if fix_rc == 0:
             # Evidence check: a reconcile that returned 0 from the "nothing to
@@ -426,6 +438,45 @@ def _bootstrap_main(argv: list[str]) -> int:
         return fix_rc
 
     return 0
+
+
+def _bundled_renderer_path() -> Path | None:
+    """The wheel's copy of scripts/render_banner.py, or None when the
+    package was built without it."""
+    composer = _bundled_composer_path()
+    if composer is None:
+        return None
+    candidate = composer.parent / "render_banner.py"
+    return candidate if candidate.exists() else None
+
+
+def _render_banner_report(project_root: Path, bootstrap_rc: int) -> None:
+    """Refresh ``<project_root>/.agent-config/banner.txt`` through the
+    bundled renderer.
+
+    Best effort, like the render at the end of the bootstrap script: a
+    missing or failing renderer leaves the report the script wrote, and the
+    session's acceptance rule decides whether that report is current. The
+    renderer writes nothing when ``project_root`` is not a consumer root.
+    """
+    renderer = _bundled_renderer_path()
+    if renderer is None:
+        return
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                str(renderer),
+                "--root", str(project_root),
+                "--bootstrap-rc", str(bootstrap_rc),
+            ],
+            check=False,
+            timeout=60,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:  # pragma: no cover - a render never fails the command
+        log(f"warning: banner report not refreshed: {exc}")
 
 
 # ======================================================================

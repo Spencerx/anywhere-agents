@@ -278,6 +278,120 @@ class SkillDirectoryCopyTests(_TmpDirCase):
             gc_entries[0]["generated_from"], "active-skill:third-party-skill"
         )
 
+    def _emit_pointer_for(self, skill_md: bytes) -> tuple[str, dispatch.DispatchContext]:
+        """Run the handler over a directory-only skill whose SKILL.md is
+        ``skill_md``; return the auto-emitted pointer text and the context
+        whose pack_lock recorded it."""
+        skill_dir = self.pack_source_dir / "skills" / "described-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_bytes(skill_md)
+        with txn_mod.Transaction(self.staging, self.lock_path) as txn:
+            ctx = _make_ctx(
+                pack_name="described",
+                pack_source_dir=self.pack_source_dir,
+                project_root=self.project_root,
+                user_home=self.user_home,
+                txn=txn,
+            )
+            skill.handle_skill(
+                {
+                    "kind": "skill",
+                    "hosts": ["claude-code"],
+                    "files": [
+                        {
+                            "from": "skills/described-skill/",
+                            "to": ".claude/skills/described-skill/",
+                        }
+                    ],
+                },
+                ctx,
+            )
+            ctx.finalize_pack_lock()
+        pointer = self.project_root / ".claude" / "commands" / "described-skill.md"
+        return pointer.read_text(encoding="utf-8"), ctx
+
+    @staticmethod
+    def _frontmatter_description(pointer_text: str) -> str:
+        """The single description line, checked the way
+        tests/test_pointer_files.py checks a committed pointer."""
+        assert pointer_text.startswith("---\n"), pointer_text[:40]
+        block = pointer_text[4:].split("\n---\n", 1)[0]
+        lines = [ln for ln in block.split("\n") if ln.startswith("description:")]
+        assert len(lines) == 1, block
+        return lines[0][len("description:"):].strip()
+
+    def test_auto_emitted_pointer_carries_one_sentence_description(self) -> None:
+        """The pointer's frontmatter description is the first sentence of the
+        skill's own frontmatter description, quoted so YAML-significant
+        characters inside it cannot change the block's meaning, and the
+        template version in the lock entry says the shape changed."""
+        pointer_text, ctx = self._emit_pointer_for(
+            b"---\n"
+            b"name: described-skill\n"
+            b"description: Draft release notes: changelog first, then the summary. "
+            b"Second sentence about scope.\n"
+            b"---\n"
+            b"\n# Described\n"
+        )
+        description = self._frontmatter_description(pointer_text)
+        self.assertEqual(
+            description,
+            '"Draft release notes: changelog first, then the summary"',
+        )
+        self.assertNotRegex(description.strip('"'), r"[.!?]\s+[A-Z]")
+        self.assertLessEqual(len(description.strip('"')), 160)
+        # The lookup-order body is unchanged below the frontmatter.
+        self.assertIn(
+            "Read and follow the skill definition. Look for it at "
+            "`skills/described-skill/SKILL.md` first",
+            pointer_text,
+        )
+        gc = [
+            f for f in ctx.pack_lock["packs"]["described"]["files"]
+            if f["role"] == "generated-command"
+        ]
+        self.assertEqual(len(gc), 1)
+        self.assertTrue(
+            gc[0]["template_sha256"].startswith("aa-composer-skill-pointer-v3:"),
+            gc[0]["template_sha256"],
+        )
+
+    def test_auto_emitted_pointer_cuts_a_long_description_at_a_word(self) -> None:
+        long_first_sentence = "Word " * 60  # 300 characters, one sentence
+        pointer_text, _ctx = self._emit_pointer_for(
+            b"---\ndescription: " + long_first_sentence.encode() + b"\n---\n"
+        )
+        description = self._frontmatter_description(pointer_text).strip('"')
+        self.assertLessEqual(len(description), 160)
+        self.assertFalse(description.endswith(" "))
+        self.assertTrue(description.endswith("Word"), description)
+
+    def test_auto_emitted_pointer_falls_back_without_a_frontmatter(self) -> None:
+        """A SKILL.md with no frontmatter (the shape most third-party skills
+        start with) still yields a pointer with a one-sentence description,
+        so Claude Code's listing never shows the lookup line instead."""
+        pointer_text, _ctx = self._emit_pointer_for(b"# described\n\nBody only.\n")
+        self.assertEqual(
+            self._frontmatter_description(pointer_text),
+            '"Run the described-skill skill"',
+        )
+
+    def test_auto_emitted_pointer_reads_a_folded_description(self) -> None:
+        """A folded YAML scalar (`description: >`) is what pack.yaml authors
+        write for long descriptions; the pointer gets its first sentence."""
+        pointer_text, _ctx = self._emit_pointer_for(
+            b"---\n"
+            b"name: described-skill\n"
+            b"description: >\n"
+            b"  Folded over two lines\n"
+            b"  and then a period. Then more.\n"
+            b"---\n"
+        )
+        self.assertEqual(
+            self._frontmatter_description(pointer_text),
+            '"Folded over two lines and then a period"',
+        )
+
     def test_backslash_explicit_pointer_suppresses_auto_emit(self) -> None:
         """Regression for Round 3 Codex: a manifest that writes the
         explicit pointer mapping with backslashes (``to: .claude\\commands\\foo.md``)

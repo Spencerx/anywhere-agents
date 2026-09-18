@@ -55,7 +55,11 @@ git diff --name-only HEAD~1 HEAD -- README.md README.zh-CN.md
 bash ../agent-config/scripts/check-parity.sh
 #    The script splits shared-core files into two categories:
 #      STRICT (must be byte-identical; any diff or missing file fails):
+#        AGENTS.md (one shared baseline since the 2026-09 rewrite; it names the
+#        anywhere-agents URLs in both repos, and agent-config keeps its own lines
+#        in AGENTS.local.md, so there is no sanitize step and no drift to expect),
 #        scripts/{_python, guard.py, session_bootstrap.py, statusline.py, agent-quota.py,
+#        merge_settings.py, render_banner.py, pack_identity.py,
 #        generate_agent_configs.py, pre-push-smoke.sh, remote-smoke.sh, check-parity.sh},
 #        .claude/settings.json, .githooks/pre-push,
 #        .github/workflows/{real-agent-smoke.yml, validate.yml},
@@ -66,7 +70,6 @@ bash ../agent-config/scripts/check-parity.sh
 #        scripts/check-parity.sh is the authoritative membership list.
 #      BY-DESIGN (expected to differ; both sides must exist; a +/- line delta is
 #      reported per file for eyeball):
-#        AGENTS.md (USC / Overleaf / PyCharm stripping),
 #        user/settings.json (additionalDirectories stripping),
 #        skills/my-router (routing-table rewrite + extension guidance for forks).
 #    bootstrap/bootstrap.{sh,ps1} were BY-DESIGN until ac/bootstrap was re-synced to aa's
@@ -76,7 +79,7 @@ bash ../agent-config/scripts/check-parity.sh
 #    Exit 0 means STRICT clean and every BY-DESIGN mirror present. Exit 1 means either
 #    STRICT drift or a missing required BY-DESIGN mirror, and must be fixed before
 #    tagging. A byte-for-byte match in BY-DESIGN is flagged as a warning because it
-#    usually means a sanitization step was skipped during backport.
+#    usually means the aa-side edit of that file was skipped during backport.
 #
 #    Single-side files (no mirror; script does not check these):
 #      anywhere-agents only: README.md, README.zh-CN.md, CHANGELOG.md, RELEASING.md, packages/,
@@ -346,6 +349,6 @@ If a future workflow adds API-calling logic, update this table and the policy th
 
 ## Reference
 
-- Private release workflow (two-repo sync + sanitization discipline): see `docs/anywhere-agents.md` in the private `yzhao062/agent-config` repo.
+- Private release workflow (two-repo sync): see `anywhere-agents.md` in the `yzhao062/agent-config` repo. Since the 2026-09 rewrite `AGENTS.md` is copied unchanged and the two derived files regenerated; there is no sanitize step.
 - Review history for each release: see `CHANGELOG.md` "Review history" sections.
 - CI that guards the release: `.github/workflows/validate.yml` runs the test suite on Ubuntu + Windows.

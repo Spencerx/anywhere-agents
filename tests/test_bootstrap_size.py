@@ -1,32 +1,28 @@
-"""Phase 0 size-gate: guards against silent baseline growth in aa/AGENTS.md
-and in any per-agent file generated from it.
+"""Size gate for the shared AGENTS.md and every per-agent file generated from it.
 
-Per docs/followups/2026-05-16-aa-gh-1-context-bloat-remaining.md § Phase 0,
-revised 2026-05-17 to be agent-fungible: gate measures every per-agent
-derived file the generator produces, not just CLAUDE.md, so that a
-regression bloating any agent's file surfaces without depending on a
-single agent's tooling being present.
+The 2026-09 rewrite (docs/followups/2026-09-17-agents-md-diet.md) brought the
+shared baseline from 74.6 KB (ac) and 66.0 KB (aa) down to one file of about
+23 KB that is byte-identical in both repos. Two ceilings guard the result:
 
-Source bloat in AGENTS.md cascades to all derived files (CLAUDE.md,
-agents/codex.md, future agents) because generate_agent_configs.py strips
-per-agent tagged blocks but preserves shared content. This test guards both:
+1. A rewrite gate of 24,576 bytes, the number the rewrite was sized to. It is
+   what the acceptance criterion names and is kept here as the record.
+2. A routine ceiling per file of the measured size plus ten percent, rounded
+   up to the next 512 bytes. A change that needs more is a budget decision
+   and records the new number in CEILINGS below with its reason.
 
-1. The canonical AGENTS.md byte count (agent-agnostic root cause).
-2. Each per-agent derived file (catches per-agent generator regressions).
+Ceilings are bytes. The old version of this test in anywhere-agents used KB
+constants multiplied by 1024 under a decimal name and carried 50 KB and
+40 KB soft tiers that never failed; both are gone. Codex injects only the
+first 32 KiB of a discovered AGENTS.md by default (project_doc_max_bytes), so
+the routine ceilings also keep the baseline well inside that budget with
+room for the passive packs a consumer composes in.
 
-Scope: tests the aa upstream baseline AGENTS.md in isolation (no passive
-packs composed in). Passive-pack composition is exercised by
-test_compose_packs_v0_6; Phase 0 isolates the baseline so Lever 1
-compaction has a clean target. The fresh-install end-to-end gate
-(baseline + agent-style passive block + bytes ceiling) can layer on top
-of this once Lever 1 lands.
-
-Override env vars (regression test simulation):
-- ANYWHERE_AGENTS_SIZE_HARD_CEILING_KB (default 75; applied per file)
+The file is measured through the generator on a fresh copy, so the gate
+covers every agent the generator knows about, and a new generator target
+without a ceiling entry fails the coverage test rather than passing unseen.
 """
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 import tempfile
@@ -44,43 +40,31 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import generate_agent_configs  # noqa: E402
 
-HARD_CEILING_KB = int(os.environ.get("ANYWHERE_AGENTS_SIZE_HARD_CEILING_KB", "75"))
+# The size the 2026-09 rewrite was held to. Recorded, and asserted, so that
+# the routine ceilings below cannot drift upward past it without the table
+# saying so in a comment.
+REWRITE_GATE_BYTES = 24_576
 
-# Per-agent file ceilings (KB). The subset assertion below fails when
-# generate_agent_configs.py's AGENTS table grows new entries; add the new
-# file path here.
-AGENT_FILE_CEILINGS: dict[str, int] = {
-    "AGENTS.md": HARD_CEILING_KB,        # canonical source (drives everything)
-    "CLAUDE.md": HARD_CEILING_KB,        # Claude Code derivation
-    "agents/codex.md": HARD_CEILING_KB,  # Codex derivation
+# Routine ceilings in bytes: measured size at the rewrite (2026-09-17) plus
+# ten percent, rounded up to the next 512. Measured: AGENTS.md 23,812;
+# CLAUDE.md 24,540; agents/codex.md 24,552. The generated files carry a
+# header comment the baseline does not, which is why their ceiling is higher.
+CEILINGS: dict[str, int] = {
+    "AGENTS.md": 26_624,
+    "CLAUDE.md": 27_136,
+    "agents/codex.md": 27_136,
 }
-
-# Soft-warning tiers (KB). Informational only; never fail. The two tiers
-# match the plan's Pragmatic / Aggressive target tiers per
-# docs/followups/2026-05-16-aa-gh-1-context-bloat-remaining.md and apply
-# uniformly to every measured file. The Aggressive tier (40 KB) also
-# aligns with CC v2.1.143's "large CLAUDE.md" warning for the Claude
-# derivation specifically.
-PRAGMATIC_WARN_KB = int(os.environ.get("ANYWHERE_AGENTS_SIZE_PRAGMATIC_WARN_KB", "50"))
-AGGRESSIVE_WARN_KB = int(os.environ.get("ANYWHERE_AGENTS_SIZE_AGGRESSIVE_WARN_KB", "40"))
 
 
 class TestBootstrapSize(unittest.TestCase):
-    """Phase 0 agent-fungible size-gate."""
-
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-
-        # Seed tmp consumer with the upstream baseline only (no passive packs).
-        # Use binary copy so line endings are preserved exactly across platforms:
-        # write_text() on Windows converts LF -> CRLF, which inflates the byte
-        # count by ~1 byte per line and produces different measurements on
-        # ubuntu vs windows runners. The size-gate must be deterministic.
+        # Binary copy so line endings survive: write_text() on Windows turns
+        # LF into CRLF, which adds a byte per line and makes the measurement
+        # differ between the ubuntu and windows runners.
         (self.root / "AGENTS.md").write_bytes((ROOT / "AGENTS.md").read_bytes())
-
-        # Run the generator to produce per-agent files (CLAUDE.md, agents/codex.md, ...).
         result = subprocess.run(
             [
                 sys.executable,
@@ -98,80 +82,68 @@ class TestBootstrapSize(unittest.TestCase):
             f"stdout={result.stdout!r}\nstderr={result.stderr!r}",
         )
 
-    def test_each_agent_file_under_hard_ceiling(self) -> None:
-        """Every measured agent file must stay under its hard ceiling.
+    def test_each_file_under_its_ceiling(self) -> None:
+        """Every measured file stays under its routine ceiling.
 
-        Agent-fungible: the assertion loops over every per-agent file in
-        AGENT_FILE_CEILINGS. Adding a new agent (extending AGENTS in
-        scripts/generate_agent_configs.py) requires adding the file's
-        ceiling here; the companion coverage test fails until that entry exists.
-
-        On failure, all violations are reported together so a single test
-        run surfaces every agent file that regressed.
+        All violations are reported together so one run shows every file
+        that regressed. A missing generator output is a failure, not a skip:
+        if the generator drops or renames a target, the gate says so.
         """
         violations: list[str] = []
-        for rel, ceiling_kb in AGENT_FILE_CEILINGS.items():
+        for rel, ceiling in CEILINGS.items():
             path = self.root / rel
             if not path.exists():
-                # Missing expected output is a regression, not a skip. If
-                # generate_agent_configs.py drops or renames a target, the
-                # size-gate must fail loudly rather than silently pass.
                 violations.append(f"{rel}: expected generated file is missing")
-                print(
-                    f"bootstrap-size: {rel} MISSING (expected generated file)",
-                    file=sys.stderr,
-                )
                 continue
             size = path.stat().st_size
-            size_kb = size / 1024
-
-            # Always emit the measurement so Phase 1+2 work can read the
-            # baseline trajectory from test output. Show the tighter tier
-            # crossed (Pragmatic 50 KB takes precedence over Aggressive
-            # 40 KB when both fire); both are informational, not failures.
-            note = ""
-            if size > PRAGMATIC_WARN_KB * 1024:
-                note = f" [SOFT WARN: > {PRAGMATIC_WARN_KB} KB Pragmatic]"
-            elif size > AGGRESSIVE_WARN_KB * 1024:
-                note = f" [SOFT WARN: > {AGGRESSIVE_WARN_KB} KB Aggressive]"
-            print(
-                f"bootstrap-size: {rel} = {size} B ({size_kb:.1f} KB){note}",
-                file=sys.stderr,
-            )
-
-            if size >= ceiling_kb * 1024:
-                violations.append(
-                    f"{rel}: {size_kb:.1f} KB exceeds {ceiling_kb} KB hard ceiling"
-                )
-
+            # Always print the measurement so the trajectory is readable from
+            # test output without a separate script.
+            print(f"bootstrap-size: {rel} = {size} B (ceiling {ceiling} B)", file=sys.stderr)
+            if size > ceiling:
+                violations.append(f"{rel}: {size} B exceeds the {ceiling} B ceiling")
         if violations:
             self.fail(
-                "Phase 0 size-gate failed for one or more agent files:\n  "
-                + "\n  ".join(violations)
-                + "\n\nInvestigate aa/AGENTS.md or per-agent tag block growth. "
-                "Re-run with ANYWHERE_AGENTS_SIZE_HARD_CEILING_KB=<higher> "
-                "to confirm the gate is what failed (vs. genuine regression)."
+                "size gate failed:\n  " + "\n  ".join(violations)
+                + "\n\nAGENTS.md holds rules; rationale and how-to material go to "
+                "docs/ and are linked from its Reference section. A larger "
+                "budget is a recorded decision: raise the entry in CEILINGS "
+                "with a comment saying why."
+            )
+
+    def test_rewrite_gate_is_the_recorded_number(self) -> None:
+        """The 2026-09 rewrite gate is history, not a dial. A later budget
+        decision adds its own constant and comment; it does not move this
+        one, so the assertion below cannot be loosened by editing the gate."""
+        self.assertEqual(REWRITE_GATE_BYTES, 24_576)
+
+    def test_ceilings_stay_within_ten_percent_of_the_rewrite_gate(self) -> None:
+        """Routine ceilings stay within the historical rewrite gate plus ten
+        percent, rounded to 512 bytes. A later increase requires a separately
+        documented budget and an updated bound in this test; keep
+        REWRITE_GATE_BYTES fixed at its historical value.
+        """
+        allowed = -(-(REWRITE_GATE_BYTES + REWRITE_GATE_BYTES // 10) // 512) * 512
+        for rel, ceiling in CEILINGS.items():
+            self.assertLessEqual(
+                ceiling, allowed,
+                f"{rel} ceiling {ceiling} B is above the rewrite gate plus ten "
+                f"percent ({allowed} B); record the budget decision",
             )
 
     def test_ceiling_table_covers_all_generator_targets(self) -> None:
-        """Enforce the agent-fungibility contract at test discovery time.
+        """CEILINGS names AGENTS.md plus every file the generator produces.
 
-        AGENT_FILE_CEILINGS must include AGENTS.md plus every per-agent
-        file the generator produces (read from generate_agent_configs.AGENTS).
-        If a new agent is added to the generator (e.g., a future Gemini
-        target) without a matching ceiling entry here, this test fails
-        until the ceiling is added — agent-fungibility enforced by the
-        gate itself, not by maintainer memory.
+        A new generator target (a future Gemini file, say) without a ceiling
+        entry fails here until the entry exists, so coverage does not depend
+        on anyone remembering this file.
         """
         expected = {"AGENTS.md"} | {
             agent["output_rel"] for agent in generate_agent_configs.AGENTS
         }
-        missing = expected - set(AGENT_FILE_CEILINGS)
+        missing = expected - set(CEILINGS)
         self.assertFalse(
             missing,
-            f"AGENT_FILE_CEILINGS is missing entries for generator outputs: "
-            f"{sorted(missing)}. Add ceilings for these files so the "
-            f"size-gate covers all agents the generator produces.",
+            f"CEILINGS is missing entries for generator outputs: {sorted(missing)}",
         )
 
 

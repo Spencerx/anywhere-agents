@@ -1,20 +1,20 @@
-"""Section-level AGENTS.md mirror parity for the pack-deployment banner bullet.
+"""The shared AGENTS.md is one file in two repos; this checks the mirror.
 
-The full-file AGENTS.md byte-equality is BY-DESIGN per scripts/check-parity.sh
-(both files must exist; full-file identity is not asserted). This test asserts
-that the *section* added for the new pack-deployment banner check (item 7
-under "How to populate each field") is byte-identical between the aa and ac
-copies.
+Since the 2026-09 rewrite the shared baseline is authored in agent-config and
+mirrored byte for byte into anywhere-agents (scripts/check-parity.sh lists it
+under STRICT). The old section-level test here compared one banner bullet
+across the two copies because the whole file was allowed to differ; full-file
+identity now replaces it.
 
-The cross-repo assertion only runs when the ac sibling clone is available
-on the maintainer's local filesystem. CI environments have only one repo
-on disk, so the cross-repo case is skipped there. The single-repo
-"bullet exists in aa AGENTS.md" check always runs.
+The cross-repo assertion runs only when the ac sibling clone is on the
+maintainer's filesystem; CI has one repo on disk and skips it. The
+single-repo checks (no maintainer-only lines in the shared file, the
+generated files derived from it, the wheel mirror in step with the source)
+always run.
 """
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -30,166 +30,82 @@ import _quiet_spawn  # noqa: E402,F401  installs a windowless spawn default on W
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AA_AGENTS = REPO_ROOT / "AGENTS.md"
-AA_CLAUDE = REPO_ROOT / "CLAUDE.md"
-AA_CODEX = REPO_ROOT / "agents" / "codex.md"
 
-_BULLET_HEADING_RE = re.compile(r"^7\. \*\*Pack deployment\*\*", re.MULTILINE)
-_NEXT_BOUNDARY_RE = re.compile(r"^(?:\d+\. \*\*|## )", re.MULTILINE)
-
-
-def _extract_bullet(agents_md_path: Path) -> str | None:
-    """Extract the item-7 ``Pack deployment`` bullet from an AGENTS.md file.
-
-    Returns ``None`` when the anchor is not found, so the caller fails
-    closed (a future restructure that loses item 7 surfaces as a test
-    failure rather than a silent skip).
-    """
-    text = agents_md_path.read_text(encoding="utf-8")
-    start_match = _BULLET_HEADING_RE.search(text)
-    if not start_match:
-        return None
-    start = start_match.start()
-    after = text[start_match.end():]
-    end_match = _NEXT_BOUNDARY_RE.search(after)
-    end = start_match.end() + end_match.start() if end_match else len(text)
-    return text[start:end].rstrip()
+# Tokens that belong to the maintainer's own setup and reach consumers through
+# the agent-pack packs or stay in agent-config/AGENTS.local.md. The shared
+# file keeps personal content out by construction rather than by a strip
+# step, and this pins that.
+MAINTAINER_ONLY_TOKENS = ("py312", "PyCharm", "Overleaf", "yuezh", "USC")
 
 
-def _candidate_ac_agents_md_paths() -> list[Path]:
+def _candidate_ac_roots() -> list[Path]:
     """Sibling lookup paths for an ac clone (maintainer-local, not CI)."""
     candidates: list[Path] = []
     env = os.environ.get("AGENT_CONFIG_REPO")
     if env:
-        candidates.append(Path(env) / "AGENTS.md")
-    parent = REPO_ROOT.parent
-    candidates.append(parent / "agent-config" / "AGENTS.md")
+        candidates.append(Path(env))
+    candidates.append(REPO_ROOT.parent / "agent-config")
     return candidates
 
 
-def _find_ac_agents_md() -> Path | None:
-    for c in _candidate_ac_agents_md_paths():
-        if c.is_file():
+def _find_ac_root() -> Path | None:
+    for c in _candidate_ac_roots():
+        if (c / "AGENTS.md").is_file() and (c / "scripts" / "check-parity.sh").is_file():
             return c
     return None
 
 
-def _generated_files_in_repo(repo_root: Path) -> list[tuple[str, Path]]:
-    """Return ``(label, path)`` pairs for the three rule files that must
-    carry a byte-identical copy of item 7: ``AGENTS.md`` (source of truth)
-    and the two generated rule files derived from it. Used by the
-    cross-variant drift assertion below.
-    """
-    return [
-        ("AGENTS.md", repo_root / "AGENTS.md"),
-        ("CLAUDE.md", repo_root / "CLAUDE.md"),
-        ("agents/codex.md", repo_root / "agents" / "codex.md"),
-    ]
+class SharedBaselineTests(unittest.TestCase):
+    def test_shared_file_carries_no_maintainer_only_lines(self) -> None:
+        text = AA_AGENTS.read_text(encoding="utf-8")
+        for token in MAINTAINER_ONLY_TOKENS:
+            self.assertNotIn(
+                token, text,
+                f"{token!r} in the shared AGENTS.md; maintainer lines go to "
+                "agent-config/AGENTS.local.md or an agent-pack pack",
+            )
+
+    def test_shared_file_names_the_public_upstream(self) -> None:
+        text = AA_AGENTS.read_text(encoding="utf-8")
+        self.assertIn("raw.githubusercontent.com/yzhao062/anywhere-agents/main/bootstrap/", text)
+        self.assertNotIn("raw.githubusercontent.com/yzhao062/agent-config/", text)
 
 
-class BannerBulletPresenceTests(unittest.TestCase):
-    def test_bullet_exists_in_aa_agents(self) -> None:
-        bullet = _extract_bullet(AA_AGENTS)
-        self.assertIsNotNone(
-            bullet,
-            "expected '7. **Pack deployment**' anchor in aa AGENTS.md "
-            "(check that section was not renumbered or removed)",
-        )
-        self.assertIn("user-level pack(s) not deployed", bullet)
-        self.assertIn("normalize_pack_source_url", bullet)
+class SharedBaselineMirrorTests(unittest.TestCase):
+    """Cross-repo: the shared file and its generated copies are byte-identical
+    between anywhere-agents and the agent-config sibling clone.
 
-    def test_bullet_has_four_steps(self) -> None:
-        bullet = _extract_bullet(AA_AGENTS)
-        self.assertIsNotNone(bullet)
-        for step in ("a.", "b.", "c.", "d."):
-            self.assertIn(step, bullet, f"expected step {step!r} in bullet")
-
-    def test_bullet_byte_identical_across_aa_generated(self) -> None:
-        """Item 7 must be byte-identical across aa AGENTS.md, CLAUDE.md,
-        and agents/codex.md. The generator copies AGENTS.md content
-        unchanged, so any drift means generation was skipped or hand-
-        edited the generated files.
-        """
-        agents_bullet = _extract_bullet(AA_AGENTS)
-        claude_bullet = _extract_bullet(AA_CLAUDE)
-        codex_bullet = _extract_bullet(AA_CODEX)
-        self.assertIsNotNone(agents_bullet, "aa AGENTS.md bullet missing")
-        self.assertIsNotNone(claude_bullet, "aa CLAUDE.md bullet missing")
-        self.assertIsNotNone(codex_bullet, "aa agents/codex.md bullet missing")
-        self.assertEqual(
-            agents_bullet,
-            claude_bullet,
-            "aa AGENTS.md ↔ CLAUDE.md item 7 drift; rerun "
-            "`python scripts/generate_agent_configs.py`.",
-        )
-        self.assertEqual(
-            agents_bullet,
-            codex_bullet,
-            "aa AGENTS.md ↔ agents/codex.md item 7 drift; rerun "
-            "`python scripts/generate_agent_configs.py`.",
-        )
-
-
-class BannerBulletMirrorTests(unittest.TestCase):
-    """Cross-repo: item 7 must be byte-identical across all six rule files
-    (aa AGENTS.md, aa CLAUDE.md, aa agents/codex.md, ac AGENTS.md,
-    ac CLAUDE.md, ac agents/codex.md).
-
-    Only runs when an ac sibling clone is available locally. CI has only
-    one repo on disk and skips this class; the maintainer's local runs
-    and the pre-push smoke catch drift before it ships.
+    Only runs when an ac sibling clone is available locally. CI has only one
+    repo on disk and skips this class; the maintainer's local runs and
+    scripts/check-parity.sh catch drift before a release.
     """
 
     def setUp(self) -> None:
-        ac_agents = _find_ac_agents_md()
-        if ac_agents is None:
+        ac_root = _find_ac_root()
+        if ac_root is None:
             self.skipTest(
                 "ac sibling clone not found; set AGENT_CONFIG_REPO env or "
                 "place the agent-config clone next to anywhere-agents"
             )
-        self.ac_root = ac_agents.parent
-        self.ac_agents = ac_agents
+        self.ac_root = ac_root
 
-    def test_bullet_byte_identical_aa_ac(self) -> None:
-        aa_bullet = _extract_bullet(AA_AGENTS)
-        ac_bullet = _extract_bullet(self.ac_agents)
-        self.assertIsNotNone(aa_bullet, "aa bullet anchor missing")
-        self.assertIsNotNone(ac_bullet, "ac bullet anchor missing")
+    def test_agents_md_is_byte_identical_with_ac(self) -> None:
         self.assertEqual(
-            aa_bullet,
-            ac_bullet,
-            "pack-deployment bullet drifted between aa and ac AGENTS.md; "
-            "they must be byte-identical (mirror parity).",
+            AA_AGENTS.read_bytes(),
+            (self.ac_root / "AGENTS.md").read_bytes(),
+            "AGENTS.md drifted between anywhere-agents and agent-config; "
+            "copy the agent-config file over this one and regenerate "
+            "(`python scripts/generate_agent_configs.py`).",
         )
 
-    def test_bullet_byte_identical_across_all_six(self) -> None:
-        """All six rule files (aa+ac × AGENTS/CLAUDE/codex) must share
-        byte-identical item 7. Round 2 Codex flagged that the prior
-        test only covered AGENTS.md; the generated CLAUDE.md and
-        agents/codex.md could drift silently. This test pins all six.
-        """
-        files = [("aa", label, p) for label, p in _generated_files_in_repo(REPO_ROOT)]
-        files += [("ac", label, p) for label, p in _generated_files_in_repo(self.ac_root)]
-        bullets = []
-        for repo_label, file_label, path in files:
-            bullet = _extract_bullet(path)
-            self.assertIsNotNone(
-                bullet,
-                f"{repo_label}/{file_label}: item 7 anchor missing",
-            )
-            bullets.append((f"{repo_label}/{file_label}", bullet))
-        # Pick a reference (aa/AGENTS.md is the source of truth) and
-        # diff every other file against it. Reporting the first
-        # mismatch is enough to flag the drift; the user can re-run
-        # generate_agent_configs.py and the parity script to converge.
-        ref_label, ref_bullet = bullets[0]
-        for label, bullet in bullets[1:]:
-            self.assertEqual(
-                ref_bullet,
-                bullet,
-                f"item 7 drift: {label} differs from {ref_label}; "
-                "rerun `python scripts/generate_agent_configs.py` in "
-                "the affected repo and `bash scripts/check-parity.sh`.",
-            )
+    def test_generated_files_are_byte_identical_with_ac(self) -> None:
+        for rel in ("CLAUDE.md", "agents/codex.md"):
+            with self.subTest(file=rel):
+                self.assertEqual(
+                    (REPO_ROOT / rel).read_bytes(),
+                    (self.ac_root / rel).read_bytes(),
+                    f"{rel} drifted between the repos; regenerate in both",
+                )
 
 
 class AaInternalStrictBlockTests(unittest.TestCase):
@@ -298,6 +214,24 @@ class AaInternalStrictBlockTests(unittest.TestCase):
             )
         finally:
             self.MIRROR_FILE.write_bytes(original)
+
+    def test_aa_internal_strict_covers_the_vendored_renderer(self) -> None:
+        """The wheel re-renders the session banner after its heal pass from
+        composer/scripts/render_banner.py, so that copy and pack_identity.py
+        beside it are release-gated like the composer itself."""
+        mirror_scripts = self.MIRROR_FILE.parent.parent / "scripts"
+        for name in ("render_banner.py", "pack_identity.py"):
+            with self.subTest(file=name):
+                mirrored = mirror_scripts / name
+                self.assertTrue(mirrored.is_file(), f"{name} missing from the wheel mirror")
+                original = mirrored.read_bytes()
+                try:
+                    mirrored.write_bytes(original + b"\n# drift\n")
+                    result = self._run_script()
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn(f"scripts/{name}", result.stdout + result.stderr)
+                finally:
+                    mirrored.write_bytes(original)
 
 
 if __name__ == "__main__":

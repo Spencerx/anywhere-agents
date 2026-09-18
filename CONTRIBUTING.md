@@ -66,6 +66,15 @@ Pure doc / test / CI-workflow changes skip the smoke automatically and push fast
 
 Prerequisites on the pushing machine: `bash`, `python` (for the generator-determinism diff), and optionally `claude` / `codex` on `PATH` for the agent-roster checks. Agent calls are skipped gracefully if the corresponding CLI is missing — useful for maintainers who only have one agent configured on a given machine. (The separate `scripts/remote-smoke.sh` has different prerequisites — `pipx` / `npx` / `curl` — because it tests the published install path, not the current checkout.)
 
+## Console windows flashing during Windows test runs
+
+A process launched as a background task owns no console, so every console child it spawns asks Windows for one, and that one is shown. A suite that spawns shells continuously flashes a window roughly once a second across whatever else is on screen; the owner varies by depth, so a capture may name `powershell.exe`, `pwsh.exe`, or `cmd.exe`. Two measures, both measured against this repository's suite:
+
+- Give the runner process a hidden console, which every descendant inherits so none of them allocates: launch the suite through `Start-Process -WindowStyle Hidden -Wait -RedirectStandardOutput <file>`. Measured: about one window per second before, zero after. This covers the whole tree and is the one that matters.
+- Keep `CREATE_NO_WINDOW` on the shells the suite spawns, which `tests/_quiet_spawn.py` installs by patching `subprocess.run` and `subprocess.Popen`. Measured on an isolated shell-to-`cmd.exe` chain: three windows over three runs before, zero after. It reaches only the process it is applied to, so it is a second layer rather than a substitute for the first.
+
+Setting the Windows default terminal application to Windows Console Host helps as well. Windows Terminal turns each allocation into a full terminal window and does not honor `SW_HIDE` on it, whereas `conhost` does, so the setting changes how loud the problem is rather than removing it. Settings, System, For developers, Terminal; or set `DelegationConsole` and `DelegationTerminal` under `HKCU:\Console\%%Startup` to `{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}`. Opening Windows Terminal yourself is unaffected.
+
 ## Security issues
 
 For security-sensitive issues (hook escape, unsafe command execution), please email the maintainer directly rather than opening a public issue. Contact via the email on [github.com/yzhao062](https://github.com/yzhao062).

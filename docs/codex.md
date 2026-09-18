@@ -1,0 +1,63 @@
+# Codex
+
+Codex is the gatekeeper in the default division of labor. It reviews what Claude Code or a person produced, and `/vet` is how it is reached. `AGENTS.md` § "Environment" holds the policy lines: model, tier, effort, approval policy, and the `project_doc_max_bytes` budget. This page holds the configuration those lines summarize, the effort ladder, the service tiers, the CLI floors as history, and the status of the routes this project no longer uses.
+
+## Recommended `config.toml`
+
+`~/.codex/config.toml` on macOS and Linux, `%USERPROFILE%\.codex\config.toml` on Windows:
+
+```toml
+model = "gpt-6-astra"
+model_reasoning_effort = "xhigh"
+service_tier = "standard"
+approval_policy = "on-request"
+project_doc_max_bytes = 262144
+
+[features]
+fast_mode = false
+
+[desktop]
+conversationDetailMode = "DEFAULT"
+```
+
+`conversationDetailMode = "DEFAULT"` keeps terminal output concise; `STEPS_PROSE` shows command-level progress during turns and is rarely wanted. `approval_policy = "on-request"` is for interactive sessions; the dispatcher sets its own policy for a review.
+
+## The Byte Budget
+
+Codex limits the combined size of the instruction files it discovers (`AGENTS.override.md` or `AGENTS.md` at each level, root first) to `project_doc_max_bytes`, 32 KiB by default. The root file is read first and truncated to what remains of the budget, with a warning that only tracing-level logging shows. Later files in the chain are dropped once the budget is spent. The pre-rewrite baseline placed Writing Defaults and Git Safety beyond that limit, at bytes 36,208 and 40,549 of the 66 KB file. A review that ran with the default budget therefore lost both sections and every appended pack. The compact composition is about 55 KB and still exceeds the default. Set `project_doc_max_bytes = 262144` for interactive sessions; the dispatcher supplies the same value for reviews, and the banner flags a missing or smaller value.
+
+`dispatch-codex` passes `-c project_doc_max_bytes=262144` on its own command line, beside `developer_instructions`, because a review runs under `--ignore-user-config` by default and a value in `config.toml` alone would not survive that flag. The key in the file therefore covers interactive sessions; the dispatcher covers reviews. Codex discovers `AGENTS.override.md`, then `AGENTS.md`, per directory from the repo root to the working directory. It never reads `AGENTS.local.md` or `agents/codex.md` on its own. A rule that must reach a Codex session therefore belongs in `AGENTS.md`, and `agents/codex.md` applies only where a rule or a person points at it.
+
+## Models and CLI Floors
+
+Each model generation carries a CLI floor. Below it the service rejects the first turn with an HTTP 400 that names the model: `The '<model>' model requires a newer version of Codex.` The GPT-5.6 family (`gpt-5.6-sol` flagship, `gpt-5.6-terra` mid, `gpt-5.6-luna` cheapest) has a floor of 0.144.0. On that family 0.142.5 and 0.143.0 fail, and 0.144.0 and 0.144.1 work. GPT-6 Astra (`gpt-6-astra`) fails at 0.149.0-alpha.4.3 and works at 0.153.3. No build between the two was tested, so the banner uses 0.150.0 as its floor. When the model errors, `npm install -g @openai/codex@latest` first.
+
+`gpt-6-astra` is the current flagship and the default for the gatekeeper role, because that is where model quality pays off. The cost reduction in this project came from dropping Codex out of `prun` fan-out, where Agy runs the units, rather than from running the reviewer on a cheaper model. The banner reports the model and tier as configured and flags only a CLI below the floor of the configured generation or a model older than the GPT-5.6 family.
+
+## Effort Ladder
+
+`model_reasoning_effort` is not validated client-side. An unknown value reaches the service, which rejects the first turn with an HTTP 400 and exits nonzero, so a typo fails loudly. That error's enumerated list (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`) is incomplete: `max` and `ultra` are also accepted on GPT-5.6 and GPT-6.
+
+`ultra` is not simply more reasoning than `max`. For GPT-6 Astra and GPT-5.6 Sol the single-agent reasoning ladder ends at `max`; `ultra` keeps that same maximum and switches the harness into automatic task delegation. The rollout records `multi_agent_mode: proactive` for `ultra` and `explicitRequestOnly` for `max`, and Astra measured the same on 0.153.3 (`xhigh` and `max` both record `explicitRequestOnly`). GPT-5.6 Terra also exposes `ultra`; Luna tops out at `max`. Use `xhigh` as the shared default, `max` when a task earns the extra depth, and `ultra` only when proactive delegation is wanted.
+
+To confirm which mode landed, read `~/.codex/sessions/**/rollout-*.jsonl` (`payload.model`, `payload.effort`, and `multi_agent_mode`) rather than the config file. A sibling `collaboration_mode` block records `mode: default` at every effort and does not carry the delegation signal, and `service_tier` is not recorded there at all.
+
+The `implement-review` dispatcher keeps `xhigh` (`CODEX_DISPATCH_REASONING`) as its floor, because models older than GPT-5.6 reject `max` and `ultra`. That is a compatibility floor, not a claim that `xhigh` is full strength.
+
+## Service Tiers
+
+`service_tier` buys latency, never quality. It selects the serving queue only: the model, its weights, and `model_reasoning_effort` are identical across tiers, so `standard` returns the answer `fast` would, generated more slowly. The three tiers are `flex` (a lower-priority queue at roughly half rate, availability not guaranteed), `standard` (the tier used when the key is unset), and `fast` (faster generation at a higher credit rate). For ChatGPT authentication, `fast` bills at 2.5x the standard credit rate on GPT-6 Astra, GPT-5.6, and GPT-5.5, and 2x on GPT-5.4. API-key authentication uses API token pricing for the selected processing tier instead. OpenAI publishes a 1.5x speed figure for GPT-5.6, GPT-5.5, and GPT-5.4 and no multiplier for Astra. Sources: the [pricing page](https://learn.chatgpt.com/docs/pricing) and the [speed page](https://learn.chatgpt.com/docs/agent-configuration/speed). Local probes confirmed that Codex 0.153.3 accepts the tier for `gpt-6-astra` without a warning. The older 0.149.0-alpha.4.3 warns that the tier is not advertised there. That warning is stale client metadata rather than a server rule. `fast` is the current config spelling and maps to the request value `priority`. A file that still reads `priority` names the same tier.
+
+Default to `standard`. Since Codex serves only the `/vet` role, no person waits on `fast` tokens by default. A session earns the 2.5x when a second account absorbs the rate or the work is time-critical. Then dial up with `/fast on` mid-session, or keep a second profile with `service_tier = "fast"` selected by `codex -p <name>`.
+
+## The Dispatcher and User Config Isolation
+
+By default `dispatch-codex` passes `--ignore-user-config` to `codex exec`, so a review does not inherit the interactive model, tier, or MCP servers, and each round behaves the same on every machine. The dispatcher passes the byte budget and the reasoning floor itself. `CODEX_DISPATCH_ISOLATE_MCP=off` restores the full user config, model and tier included, while the explicit byte budget still applies. Hardcoding `fast` into the isolated path was avoided deliberately, since it would fail every round for an account without the tier.
+
+## Hooks
+
+Codex 0.153.3 and later ship hooks, including `SessionStart`, but this project has not wired `session_bootstrap.py` and `guard.py` into them (anywhere-agents#50). Hook trust hashing, installation, and permission semantics need their own scope. Until then, a Codex session runs bootstrap through the block at the top of `AGENTS.md` and prints the session banner on its first reply; see [Session banner](session-banner.md).
+
+## The MCP Route (Retired)
+
+Earlier versions of the shared file described registering Codex as an MCP server inside Claude Code (`claude mcp add codex -s user -- codex mcp-server -c approval_policy=never`), with notes on Windows PATH handling and approval dialogs. Measured over 60 days of local transcripts, the route appeared in 17 Codex invocations against 93 percent through `codex exec`, and the maintainer confirmed it unused; the 2026-09 rewrite removed it. Reviews run through `/vet`, which dispatches `codex exec` from a terminal on every platform. A fork that wants the MCP route registers the server at user scope (project-scoped entries do not propagate across directories) and restarts the session for `/mcp` to pick it up.

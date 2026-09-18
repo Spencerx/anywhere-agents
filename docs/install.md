@@ -115,8 +115,56 @@ Consumers who want to keep the old full-body source must set an explicit overrid
 
 - **`git >= 2.25`**: required for the sparse clone the bootstrap performs (`git clone --filter=blob:none --sparse`). `--sparse` is the Git 2.25 floor (2020-01-13); `--filter=blob:none` is the older partial-clone option (Git 2.19+). Bootstrap detects older git up front and exits with a platform-specific install line (macOS: `brew install git`; Debian / Ubuntu: `sudo apt update && sudo apt install -y git`; Windows: `https://git-scm.com/download/win`). Windows users: Git for Windows also provides `bash`, which both bootstrap paths benefit from. Unparseable `git --version` strings default-pass with a stderr warning so unusual distro suffixes do not block modern systems.
 - **Python 3.x** — required for the settings merge step (stdlib only, any recent version). If unavailable, bootstrap continues without merge.
-- **Claude Code** or **Codex** — the agents that consume this config. See their respective docs for install instructions.
+- **Claude Code** or **Codex** — the agents that consume this config. See [Installing the agents](#installing-the-agents) below.
 - **`pipx`** or **`npx`** — required only for the package-manager install paths, not for raw shell.
+
+## Installing the Agents
+
+### Claude Code
+
+Prefer the native installer, which updates itself in the background; the npm and winget packages do not.
+
+```bash
+# macOS / Linux
+curl -fsSL https://claude.ai/install.sh | bash
+```
+
+```powershell
+# Windows (PowerShell, no admin; needs Git for Windows)
+irm https://claude.ai/install.ps1 | iex
+```
+
+Migrating from a package manager: run `npm uninstall -g @anthropic-ai/claude-code` or `winget uninstall Anthropic.ClaudeCode` first, then the native installer. Inside Claude Code, `/config` sets the release channel (`latest` or `stable`). `claude doctor` inspects the updater and `claude update` forces an immediate check. To disable auto-update, set `DISABLE_AUTOUPDATER=1` in the environment or add `"env": {"DISABLE_AUTOUPDATER": "1"}` to `~/.claude/settings.json`; the environment variable takes precedence over every other flag. The session banner reads the same signals to report `auto-update: on` or `off`.
+
+**Effort level.** Bootstrap installs `CLAUDE_CODE_EFFORT_LEVEL=max` into the `env` block of `~/.claude/settings.json` through the shared `user/settings.json`, so one bootstrap run on any consuming project lands the user-level default. The precedence at runtime is managed policy, then the `CLAUDE_CODE_EFFORT_LEVEL` environment variable, then the persisted `effortLevel` (local settings over project over user), then the built-in default. With the variable set it outranks `--effort` at launch and `/effort` inside a session, and the slash command prints a warning that the variable is overriding the live effort. Without it, `--effort <level>` at launch is a session-only override, `/effort low|medium|high|xhigh` updates the persisted user setting, and `/effort max` is session-only.
+
+The variable is the persistent form because the persisted key does not accept it. As of Claude Code v2.1.111 the `/effort` slider exposes `low`, `medium`, `high`, `xhigh`, and `max`, while the persisted `effortLevel` accepts the first four (v2.1.111 added `xhigh`). Selecting `max` through the slider therefore silently does not persist. To set the variable by hand:
+
+```bash
+# macOS / Linux: add to the env block of ~/.claude/settings.json
+python3 - <<'EOF'
+import json, pathlib
+p = pathlib.Path.home() / ".claude" / "settings.json"
+data = json.loads(p.read_text()) if p.exists() else {}
+data.setdefault("env", {})["CLAUDE_CODE_EFFORT_LEVEL"] = "max"
+p.write_text(json.dumps(data, indent=2) + "\n")
+EOF
+```
+
+```powershell
+# Windows (PowerShell): the same edit
+$p = Join-Path $env:USERPROFILE ".claude\settings.json"
+$data = if (Test-Path $p) { Get-Content $p -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
+if (-not $data.env) { $data | Add-Member -NotePropertyName env -NotePropertyValue ([pscustomobject]@{}) }
+$data.env | Add-Member -NotePropertyName CLAUDE_CODE_EFFORT_LEVEL -NotePropertyValue "max" -Force
+# WriteAllText with an explicit encoding: Set-Content -Encoding utf8 writes a
+# byte-order mark on Windows PowerShell 5.1, which a strict JSON reader rejects.
+[System.IO.File]::WriteAllText($p, ($data | ConvertTo-Json -Depth 10) + "`n", [System.Text.UTF8Encoding]::new($false))
+```
+
+### Codex
+
+`npm install -g @openai/codex@latest` installs or updates the CLI; each model generation has a CLI floor, and the session banner flags a CLI below the floor of the configured model. The recommended `~/.codex/config.toml`, including the `project_doc_max_bytes` budget that a composed `AGENTS.md` needs, is on the [Codex](codex.md) page.
 
 ## Updating
 

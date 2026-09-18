@@ -17,6 +17,7 @@ routing-table.md hint) while giving third-party packs the documented
 from __future__ import annotations
 
 import hashlib
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -39,7 +40,16 @@ def _match_key(rel: str) -> str:
     return key.lower() if _IS_WINDOWS else key
 
 
+# Claude Code lists every command in its system prompt by the pointer's
+# `description:`; without one it shows the first body line, which says
+# nothing about the skill. The description comes from the skill's own
+# SKILL.md frontmatter, cut to one sentence, so a third-party pack that
+# ships only the skill directory still gets a listing that says what it does.
 _POINTER_TEMPLATE = (
+    "---\n"
+    "description: {description}\n"
+    "---\n"
+    "\n"
     "Read and follow the skill definition. Look for it at "
     "`skills/{name}/SKILL.md` first, then "
     "`.claude/skills/{name}/SKILL.md`, then "
@@ -48,6 +58,72 @@ _POINTER_TEMPLATE = (
     "Apply it to the user's current task. Also read the supporting files "
     "under the skill's references/ directory as needed.\n"
 )
+
+# The committed pointers and tests/test_pointer_files.py hold a description
+# to one sentence of at most this many characters.
+_DESCRIPTION_MAX_CHARS = 160
+
+_FRONTMATTER_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---(?:\r?\n|\Z)", re.DOTALL)
+_DESCRIPTION_LINE_RE = re.compile(r"^description:[ \t]*(.+?)[ \t]*$", re.MULTILINE)
+_SENTENCE_END_RE = re.compile(r"[.!?](?=\s)")
+
+
+def _frontmatter_description(text: str) -> str:
+    """The `description:` value of a SKILL.md frontmatter block, or ``""``.
+
+    PyYAML reads the block when it is importable (folded and quoted
+    scalars included); otherwise a single-line `description:` is read
+    directly, which is the shape every shipped skill uses.
+    """
+    match = _FRONTMATTER_RE.match(text)
+    if match is None:
+        return ""
+    block = match.group(1)
+    try:
+        import yaml  # type: ignore
+
+        data = yaml.safe_load(block)
+        if isinstance(data, dict) and isinstance(data.get("description"), str):
+            return data["description"]
+    except Exception:
+        pass
+    found = _DESCRIPTION_LINE_RE.findall(block)
+    if len(found) == 1:
+        return found[0].strip().strip('"').strip("'")
+    return ""
+
+
+def _one_sentence(text: str, limit: int = _DESCRIPTION_MAX_CHARS) -> str:
+    """The first sentence of ``text``, whitespace-collapsed, without its
+    terminal period, and cut at a word boundary to ``limit`` characters."""
+    flat = " ".join(text.split())
+    end = _SENTENCE_END_RE.search(flat)
+    sentence = flat[: end.start()] if end else flat
+    sentence = sentence.rstrip(" .")
+    if len(sentence) > limit:
+        cut = sentence[:limit]
+        head, sep, _tail = cut.rpartition(" ")
+        sentence = (head if sep else cut).rstrip(" ,;:.")
+    return sentence
+
+
+def _pointer_description(skill_dir: Path, skill_name: str) -> str:
+    """One YAML-safe sentence for the pointer's `description:` line."""
+    description = ""
+    skill_md = skill_dir / "SKILL.md"
+    try:
+        if skill_md.is_file():
+            description = _frontmatter_description(
+                skill_md.read_text(encoding="utf-8", errors="replace")
+            )
+    except OSError:
+        description = ""
+    sentence = _one_sentence(description) if description else ""
+    if not sentence:
+        sentence = f"Run the {skill_name} skill"
+    # Double-quoted so a colon, a hash, or a leading special character in
+    # the sentence cannot change the frontmatter's meaning.
+    return '"' + sentence.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def handle_skill(entry: dict[str, Any], ctx: DispatchContext) -> None:
@@ -154,7 +230,12 @@ def _maybe_auto_emit_pointer(
     if _match_key(pointer_rel) in explicit_targets:
         return
 
-    pointer_text = _POINTER_TEMPLATE.format(name=skill_name)
+    pointer_text = _POINTER_TEMPLATE.format(
+        name=skill_name,
+        description=_pointer_description(
+            ctx.pack_source_dir / src_rel.replace("\\", "/"), skill_name
+        ),
+    )
     pointer_bytes = pointer_text.encode("utf-8")
     pointer_abs = ctx.project_root / pointer_rel
     ctx.txn.stage_write(pointer_abs, pointer_bytes)
@@ -174,7 +255,8 @@ def _maybe_auto_emit_pointer(
             # so generated-command drift detection (Phase 4+) can tell a
             # template change from an on-disk tamper.
             "source_input_sha256": pointer_sha,
-            "template_sha256": f"aa-composer-skill-pointer-v2:{pointer_sha}",
+            # v3: the template gained the description frontmatter.
+            "template_sha256": f"aa-composer-skill-pointer-v3:{pointer_sha}",
             "output_sha256": pointer_sha,
         }
     )

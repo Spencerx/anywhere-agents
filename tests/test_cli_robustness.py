@@ -563,5 +563,92 @@ class BootstrapMainFallThroughTests(unittest.TestCase):
             )
 
 
+class BootstrapMainBannerRenderTests(unittest.TestCase):
+    """The wheel re-renders the session banner report after its heal pass.
+
+    The bootstrap script renders when it exits, before ``pack verify --fix``
+    can change the pack state, and a project whose clone predates the
+    renderer never had a report at all. So ``_bootstrap_main`` renders once
+    more through the wheel's own copy, with the exit code it is about to
+    return, and a render failure never changes that code.
+    """
+
+    def _run_bootstrap_main(self, root: Path, bootstrap_rc: int, fix_rc: int):
+        renders: list[tuple[Path, int]] = []
+        with patch("anywhere_agents.cli.choose_script", return_value=("bootstrap.sh", ["bash"])), \
+             patch("anywhere_agents.cli.bootstrap_url", return_value="http://fake/bootstrap.sh"), \
+             patch("urllib.request.urlretrieve"), \
+             patch("subprocess.run", return_value=MagicMock(returncode=bootstrap_rc)), \
+             patch("anywhere_agents.cli.main", return_value=fix_rc), \
+             patch("anywhere_agents.cli.log"), \
+             patch("anywhere_agents.cli._render_banner_report",
+                   side_effect=lambda r, rc: renders.append((r, rc))), \
+             patch("pathlib.Path.cwd", return_value=root):
+            rc = cli._bootstrap_main([])
+        return rc, renders
+
+    def test_renders_once_with_the_final_exit_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".agent-config").mkdir()
+            (root / "AGENTS.md").write_text("# composed\n", encoding="utf-8")
+            rc, renders = self._run_bootstrap_main(root, bootstrap_rc=0, fix_rc=0)
+            self.assertEqual(rc, 0)
+            self.assertEqual(renders, [(root, 0)])
+            # A failed bootstrap that the heal pass recovered renders with the
+            # recovered code; the ledger the script wrote still says what
+            # failed, and the renderer reads that.
+            rc, renders = self._run_bootstrap_main(root, bootstrap_rc=1, fix_rc=0)
+            self.assertEqual(rc, 0)
+            self.assertEqual(renders, [(root, 0)])
+            rc, renders = self._run_bootstrap_main(root, bootstrap_rc=1, fix_rc=2)
+            self.assertEqual(rc, 1)
+            self.assertEqual(renders, [(root, 1)])
+
+    def test_render_is_a_subprocess_over_the_bundled_copy(self) -> None:
+        """The render runs the wheel's render_banner.py as a subprocess with
+        --root and --bootstrap-rc, discards its output, and a raising
+        subprocess does not propagate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            calls: list[list[str]] = []
+            with patch("subprocess.run", side_effect=lambda cmd, **kw: calls.append(cmd) or MagicMock(returncode=0)):
+                cli._render_banner_report(root, 3)
+            self.assertEqual(len(calls), 1)
+            cmd = calls[0]
+            self.assertEqual(cmd[0], sys.executable)
+            self.assertEqual(Path(cmd[1]).name, "render_banner.py")
+            self.assertEqual(Path(cmd[1]).parent, cli._bundled_composer_path().parent)
+            self.assertEqual(cmd[2:], ["--root", str(root), "--bootstrap-rc", "3"])
+            with patch("subprocess.run", side_effect=OSError("no interpreter")), \
+                 patch("anywhere_agents.cli.log"):
+                cli._render_banner_report(root, 0)  # must not raise
+
+    def test_bundled_renderer_runs_standalone_against_a_consumer_root(self) -> None:
+        """The vendored pair works from the wheel directory alone: the
+        renderer imports pack_identity beside itself and publishes a report
+        whose metadata names the ledger's run_id."""
+        renderer = cli._bundled_renderer_path()
+        self.assertIsNotNone(renderer, "render_banner.py is not vendored beside the composer")
+        self.assertTrue((renderer.parent / "pack_identity.py").exists())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".agent-config").mkdir()
+            (root / ".agent-config" / "last-run.json").write_text(
+                '{"run_id": "wheel-run-1", "completed": true, "last_phase": "generate", "steps": []}',
+                encoding="utf-8",
+            )
+            env = dict(os.environ, HOME=tmp, USERPROFILE=tmp)
+            result = subprocess.run(
+                [sys.executable, str(renderer), "--root", str(root), "--bootstrap-rc", "0"],
+                capture_output=True, text=True, check=False, env=env, timeout=120,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = (root / ".agent-config" / "banner.txt").read_text(encoding="utf-8")
+            self.assertTrue(report.startswith("<!-- anywhere-agents banner "), report[:80])
+            self.assertIn("run_id=wheel-run-1", report.splitlines()[0])
+            self.assertEqual(len(report.rstrip("\n").splitlines()), 8)
+
+
 if __name__ == "__main__":
     unittest.main()

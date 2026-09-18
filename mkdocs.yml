@@ -113,5 +113,8 @@ nav:
       - Iteration example: skills/references/iteration-example.md
       - Native PowerPoint: skills/references/native-powerpoint.md
   - AGENTS.md Reference: agents-md.md
+  - Session banner: session-banner.md
+  - Guard hook: guard-hook.md
+  - Codex: codex.md
   - FAQ: faq.md
   - Changelog: changelog.md

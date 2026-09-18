@@ -20,9 +20,10 @@
 #               .github/workflows/validate.yml, bootstrap/bootstrap.sh
 #               and bootstrap/bootstrap.ps1 (promoted from BY-DESIGN
 #               when ac/bootstrap was re-synced to aa's canonical
-#               composer-aware version; ac's bootstrap snippet still
-#               curls from ac but the file served is now byte-identical
-#               to aa and includes the AC->AA migration block),
+#               composer-aware version), AGENTS.md (one shared
+#               baseline since the 2026-09 rewrite; both repos name
+#               the aa raw URLs, and ac-only lines live in
+#               ac/AGENTS.local.md),
 #               skills/{implement-review,ci-mockup-figure,readme-polish,
 #               prun,editable-figure} as recursive trees, and the shared-contract test files
 #               tests/test_{dispatch_codex,dispatch_copilot,dispatch_claude,
@@ -50,7 +51,8 @@
 #               aa). Skipped only when $AA_ROOT lacks the mirror dir.
 #               Covers
 #               compose_packs.py, compose_rule_packs.py,
-#               generate_agent_configs.py, bootstrap/packs.yaml,
+#               generate_agent_configs.py, render_banner.py,
+#               pack_identity.py, bootstrap/packs.yaml,
 #               scripts/packs/ recursive (excluding __pycache__/),
 #               skills/{implement-review,my-router,ci-mockup-figure,
 #               readme-polish,prun,editable-figure}/ recursive, the six
@@ -64,10 +66,10 @@
 #               different contents. Reports a +/- line delta per file so
 #               unusual drift is visible. A byte-for-byte match is a
 #               warning (sanitization may have been skipped during
-#               backport). Covers: AGENTS.md (USC / Overleaf / PyCharm
-#               stripping), user/settings.json (additionalDirectories
-#               stripping), skills/my-router (routing-table rewrite
-#               with extension guidance for forks).
+#               backport). Covers: user/settings.json
+#               (additionalDirectories stripping), skills/my-router
+#               (routing-table rewrite with extension guidance for
+#               forks).
 #
 # Usage:
 #   bash scripts/check-parity.sh                           # default sibling path
@@ -145,6 +147,9 @@ fail() {
 # compared with itself.
 $AA_INTERNAL_ONLY || printf '\n== strict byte-identical ==\n'
 strict_files=(
+  # One shared baseline since the 2026-09 rewrite: every consumer
+  # bootstraps it from aa, and the ac-only lines live in ac/AGENTS.local.md.
+  AGENTS.md
   scripts/_python
   scripts/guard.py
   scripts/session_bootstrap.py
@@ -154,6 +159,12 @@ strict_files=(
   # Both bootstrap entry points execute this, so it is shared runtime code by
   # the same argument as the helpers above.
   scripts/merge_settings.py
+  # The session banner renderer and the pack-identity helper it imports.
+  # Both entry points and the SessionStart hook run them from the sparse
+  # clone, and the wheel vendors the pair, so the banner is one calculation
+  # wherever it runs.
+  scripts/render_banner.py
+  scripts/pack_identity.py
   scripts/pre-push-smoke.sh
   scripts/remote-smoke.sh
   scripts/check-parity.sh
@@ -210,6 +221,12 @@ strict_test_files=(
   tests/test_health_check.py
   tests/test_guard.py
   tests/test_session_bootstrap.py
+  # Pins the report contract (metadata line, seven lines, acceptance rule)
+  # that AGENTS.md's Session Start Check and both entry points rely on.
+  tests/test_render_banner.py
+  # The shared AGENTS.md is STRICT, and this gate measures it and the two
+  # generated files against the same ceilings in both repos.
+  tests/test_bootstrap_size.py
   tests/test_pointer_files.py
   tests/test_prompt_byte_parity.py
   tests/test_bootstrap_preflight.py
@@ -321,6 +338,10 @@ if [ -d "$AA_ROOT/packages/pypi/anywhere_agents/composer" ]; then
     scripts/compose_packs.py
     scripts/compose_rule_packs.py
     scripts/generate_agent_configs.py
+    # The wheel re-renders the session banner after its heal pass, so it
+    # carries the renderer and the helper beside the composer.
+    scripts/render_banner.py
+    scripts/pack_identity.py
     bootstrap/packs.yaml
     .claude/commands/implement-review.md
     .claude/commands/vet.md
@@ -373,7 +394,6 @@ fi
 # ---- BY-DESIGN: files expected to differ (summary only; not blocking unless missing) ----
 $AA_INTERNAL_ONLY || printf '\n== expected to differ by design (summary; eyeball if delta is unusual) ==\n'
 by_design_files=(
-  AGENTS.md
   user/settings.json
 )
 for f in "${by_design_files[@]}"; do
