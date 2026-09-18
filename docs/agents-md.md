@@ -47,7 +47,7 @@ Why the diet: the file had grown by patching to 74.6 KB in one repo and 66.0 KB 
 | The session banner renderer and its helper (`render_banner.py`, `pack_identity.py`) | `scripts/` | Run from the sparse clone by both bootstrap entry points and the SessionStart hook; the wheel carries a vendored copy beside the composer for the `anywhere-agents` command |
 | Passive packs (`agent-style` by default) | The pack's own repo | Fetched by the composer and appended to the root `AGENTS.md` between begin and end markers |
 
-The skill roster above is what `scripts/pre-push-smoke.sh` and `scripts/remote-smoke.sh` ask an agent to list at release time. The shared file names the lookup paths rather than the roster, and an agent lists the skills by following them.
+The skill roster above is what `scripts/pre-push-smoke.sh`, `scripts/remote-smoke.sh`, and `real-agent-smoke.yml` ask an agent to list at release time. The shared file names the lookup paths rather than the roster, so the probe points the agent at the tree: `skills/*/SKILL.md` in a source checkout, `.claude/skills/*/SKILL.md` in a bootstrapped project. A second probe, run with every tool disabled, asks which skill `/vet` aliases; only the rules file says `implement-review`, so that answer proves the file itself was loaded.
 
 ## Consumer Repo Layout
 

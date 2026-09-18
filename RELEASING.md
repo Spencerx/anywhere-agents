@@ -126,8 +126,8 @@ Two scripts exercise different layers. CI runs complementary workflows (`validat
 `scripts/pre-push-smoke.sh` checks the commit you are about to tag — **not** the published package:
 
 1. Regenerates `CLAUDE.md` / `agents/codex.md` in a temp dir from the committed `AGENTS.md` and diffs against the committed files. Catches stale generator output.
-2. Runs `claude -p "..."` in the repo root and asserts the response lists every skill under `skills/`. Proves Claude actually loads the committed `CLAUDE.md`.
-3. Runs `codex exec "..."` with the same assertion for Codex.
+2. Runs two `claude -p` probes in the repo root. The config probe runs with every tool disabled (`--tools ""`) and asks which skill `/vet` aliases; the answer, `implement-review`, is stated only by the committed `CLAUDE.md`, so it proves the file is loaded. The roster probe asks for the directories under `skills/` that contain a `SKILL.md` and asserts every shipped skill is named. The rules file carries no roster since the 2026-09 rewrite, so the tree is the source.
+3. Runs the same two probes through `codex exec`, the config probe worded to forbid tool use.
 
 Agent calls are skipped (not failed) if the CLI is missing, so the script is useful on machines with only one agent configured.
 
@@ -317,7 +317,7 @@ Every workflow in `.github/workflows/` that calls a model API has a documented p
 | `validate.yml` | push + PR | $0 (no API calls) | — |
 | `docs-strict-build.yml` | push + PR | $0 (no API calls) | — |
 | `publish.yml` | `release: published` + manual | $0 (OIDC upload, no API keys) | PyPI `skip-existing`; npm OIDC + provenance; `npm_only` dispatch input for PyPI-already-published reruns |
-| `real-agent-smoke.yml` | `release: published` + manual | ~$0.04 | Sonnet pin on `claude -p`; handshake-only (skill-roster enumeration) |
+| `real-agent-smoke.yml` | `release: published` + manual | under $0.10 | Sonnet pin on `claude -p`; handshake-only (a config probe and a skill-roster enumeration per agent) |
 | `package-smoke.yml` | `release: published` + weekly cron + manual | $0 (install/verify only, no API keys) | 12-attempt retry loop absorbs PyPI/npm CDN lag |
 
 ### Dispatch-approval policy (for agents)
