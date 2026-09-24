@@ -330,6 +330,35 @@ class RepoValidationTests(unittest.TestCase):
         self.assertIn(bootstrap_copy, rendered)
         return rendered
 
+    def isolated_bootstrap_env(self, base_dir: Path) -> tuple[dict[str, str], Path]:
+        """Return a smoke-run environment whose home is a fixture directory.
+
+        Bootstrap's user-level phase writes ~/.claude/settings.json, the hook
+        and statusline scripts, and ~/.claude.json, resolving the home from HOME
+        on POSIX and from USERPROFILE on Windows. With the caller's environment
+        inherited, every test run merged this checkout's user/settings.json into
+        the real user settings. The Codex auto-update is off for the same
+        reason: it runs a global npm install.
+        """
+        home = base_dir / "home"
+        home.mkdir()
+        env = os.environ.copy()
+        env["ANYWHERE_AGENTS_PYTHON"] = sys.executable
+        env["ANYWHERE_AGENTS_CODEX_AUTO_UPDATE"] = "off"
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        # Keep the user-level config layer in the fixture home too, so the run
+        # reads neither the %APPDATA% nor the XDG config of whoever runs it.
+        env["APPDATA"] = str(home / "AppData" / "Roaming")
+        env["XDG_CONFIG_HOME"] = str(home / ".config")
+        # Without PyYAML, bootstrap falls back to `pip install --user pyyaml`.
+        # An inherited PYTHONUSERBASE or pip cache setting would send that
+        # install and its cache outside the fixture home.
+        env["PYTHONUSERBASE"] = str(home / ".python-user")
+        env["XDG_CACHE_HOME"] = str(home / ".cache")
+        env["PIP_CACHE_DIR"] = str(home / ".cache" / "pip")
+        return env, home
+
     def test_shipped_skill_set_matches_expectation(self) -> None:
         skill_names = {path.name for path in self.skills}
         self.assertEqual(
@@ -663,8 +692,7 @@ class RepoValidationTests(unittest.TestCase):
             project_dir = self.prepare_project_dir(base_dir)
             script = self.render_powershell_smoke_script(remote_dir)
 
-            env = os.environ.copy()
-            env["ANYWHERE_AGENTS_PYTHON"] = sys.executable
+            env, home = self.isolated_bootstrap_env(base_dir)
 
             first_run = run_command(
                 [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
@@ -687,6 +715,10 @@ class RepoValidationTests(unittest.TestCase):
             self.assert_command_ok(second_run, "second PowerShell bootstrap run")
 
             self.verify_bootstrap_result(project_dir)
+            self.assertTrue(
+                (home / ".claude" / "settings.json").is_file(),
+                "Expected the user-level phase to write into the fixture home",
+            )
 
     @unittest.skipIf(sys.platform.startswith("win"), "Unix-only bash smoke test")
     def test_bash_bootstrap_smoke_test(self) -> None:
@@ -700,8 +732,7 @@ class RepoValidationTests(unittest.TestCase):
             project_dir = self.prepare_project_dir(base_dir)
             script = self.render_bash_smoke_script(remote_dir)
 
-            env = os.environ.copy()
-            env["ANYWHERE_AGENTS_PYTHON"] = sys.executable
+            env, home = self.isolated_bootstrap_env(base_dir)
             first_run = run_command([shell, "-lc", script], project_dir, env)
             self.assert_command_ok(first_run, "first bash bootstrap run")
 
@@ -715,6 +746,10 @@ class RepoValidationTests(unittest.TestCase):
             self.assert_command_ok(second_run, "second bash bootstrap run")
 
             self.verify_bootstrap_result(project_dir)
+            self.assertTrue(
+                (home / ".claude" / "settings.json").is_file(),
+                "Expected the user-level phase to write into the fixture home",
+            )
 
 
 if __name__ == "__main__":
