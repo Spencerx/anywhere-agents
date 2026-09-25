@@ -102,6 +102,7 @@ nav:
     - editable-figure:
       - skills/editable-figure.md
       - Document contexts: skills/references/document-contexts.md
+      - Paper-first figures: skills/references/paper-first-figures.md
       - Reference search: skills/references/reference-search.md
       - Proposal figures: skills/references/proposal-figures.md
       - Proposal style exemplars: skills/references/proposal-style-exemplars.md
