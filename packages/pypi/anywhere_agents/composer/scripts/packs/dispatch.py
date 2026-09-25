@@ -85,6 +85,13 @@ class DispatchContext:
     pack_latest_known_head: str | None = None
     pack_fetched_at: str | None = None
 
+    # Names of skills staged to ``.claude/skills/<name>/`` whose effective
+    # hosts include codex. The composer passes one set to every pack's
+    # context and links those names under ``.agents/skills/`` after the
+    # transaction commits (``packs.codex_links``). ``None`` disables the
+    # collection, which keeps directly constructed contexts unchanged.
+    codex_eligible_skills: set[str] | None = None
+
     # Handler outputs: per-pack file entries collected as handlers run,
     # then copied into pack_lock.packs[pack_name].files after all active
     # entries for this pack have been dispatched.
@@ -191,13 +198,13 @@ def dispatch_active(entry: dict[str, Any], ctx: DispatchContext) -> None:
             "did scripts/packs/handlers/__init__.py import complete?"
         )
 
-    effective_hosts = _effective_hosts(entry, ctx)
-    if ctx.current_host not in effective_hosts:
+    hosts = effective_hosts(entry, ctx)
+    if ctx.current_host not in hosts:
         required = bool(entry.get("required", True))
         if required:
             raise DispatchError(
                 f"pack {ctx.pack_name!r} active entry requires host "
-                f"{effective_hosts!r} but the current host is "
+                f"{hosts!r} but the current host is "
                 f"{ctx.current_host!r}: host-mismatch"
             )
         # required=false: skip silently (the caller may log informatively).
@@ -230,7 +237,7 @@ def resolve_output_path(
     return (ctx.project_root / p).resolve(), "project-local"
 
 
-def _effective_hosts(
+def effective_hosts(
     entry: dict[str, Any], ctx: DispatchContext
 ) -> list[str]:
     """Return the hosts list that this entry targets.

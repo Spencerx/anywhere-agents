@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import dirhash
-from ..dispatch import DispatchContext
+from ..dispatch import DispatchContext, effective_hosts
 
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -137,6 +137,9 @@ def handle_skill(entry: dict[str, Any], ctx: DispatchContext) -> None:
         If the directory targets ``.claude/skills/<name>/`` AND no
         explicit mapping in the same ``files:`` list already covers
         ``.claude/commands/<name>.md``, auto-emit the canonical pointer.
+        When the entry's effective hosts include codex, also add
+        ``<name>`` to ``ctx.codex_eligible_skills`` for the post-commit
+        ``.agents/skills`` links.
       - If the source is a file, stage one copy and record the file hash.
 
     All outputs are recorded as ``role: active-skill``. Skills never
@@ -168,6 +171,7 @@ def handle_skill(entry: dict[str, Any], ctx: DispatchContext) -> None:
             _maybe_auto_emit_pointer(
                 dst_rel, src_rel, ctx, explicit_targets
             )
+            _note_codex_eligible(entry, dst_rel, ctx)
         else:
             content = src.read_bytes()
             ctx.txn.stage_write(dst, content)
@@ -192,6 +196,42 @@ def handle_skill(entry: dict[str, Any], ctx: DispatchContext) -> None:
                 "sha256": input_sha,
             }
         )
+
+
+def _skill_dir_name(dst_rel: str) -> str | None:
+    """Return ``<name>`` when ``dst_rel`` is exactly ``.claude/skills/<name>``.
+
+    Matching follows ``_maybe_auto_emit_pointer``: case-insensitive on
+    Windows, case-sensitive on POSIX. A nested target such as
+    ``.claude/skills/<name>/sub/`` is not a skill directory.
+    """
+    dst_norm = dst_rel.replace("\\", "/").rstrip("/")
+    prefix = ".claude/skills/"
+    head = dst_norm[: len(prefix)]
+    if (head.lower() if _IS_WINDOWS else head) != prefix:
+        return None
+    name = dst_norm[len(prefix):]
+    if not name or "/" in name:
+        return None
+    return name
+
+
+def _note_codex_eligible(
+    entry: dict[str, Any], dst_rel: str, ctx: DispatchContext
+) -> None:
+    """Record a dispatched skill directory whose hosts include codex.
+
+    Dispatch already ran the host check, so this sees only entries that
+    were actually staged; eligibility follows the entry and pack
+    definition that dispatch passed in.
+    """
+    if ctx.codex_eligible_skills is None:
+        return
+    if "codex" not in effective_hosts(entry, ctx):
+        return
+    name = _skill_dir_name(dst_rel)
+    if name is not None:
+        ctx.codex_eligible_skills.add(name)
 
 
 def _maybe_auto_emit_pointer(

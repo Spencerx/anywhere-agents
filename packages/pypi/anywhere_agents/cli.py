@@ -1682,11 +1682,12 @@ _STATE_GLYPHS = {
 # the same baseline.
 _DEFAULT_V2_SELECTIONS = ("agent-style", "aa-core-skills")
 
-# v0.6.0 post-review host-aware default seeding. aa-core-skills declares
-# ``hosts: [claude-code]`` in bootstrap/packs.yaml; under
-# ``AGENT_CONFIG_HOST=codex`` (or any non-claude host) the seed drops it
-# so bare ``anywhere-agents`` does not hit a host-mismatch error on
-# first run. The full ``_DEFAULT_V2_SELECTIONS`` tuple stays canonical
+# v0.6.0 post-review host-aware default seeding. Under
+# ``AGENT_CONFIG_HOST=codex`` (or any non-claude host) the seed drops a
+# Claude-only bundled default so bare ``anywhere-agents`` does not hit a
+# host-mismatch error on first run. aa-core-skills now declares
+# ``hosts: [claude-code, codex]`` in bootstrap/packs.yaml (Codex skill
+# links), so no bundled default is Claude-only today. The full ``_DEFAULT_V2_SELECTIONS`` tuple stays canonical
 # for "is this a known bundled name" checks (BC-guard, identity, drift
 # detection) — those still need to recognize aa-core-skills as a known
 # default name even under codex, so a user-pinned aa-core-skills row
@@ -1695,7 +1696,7 @@ _DEFAULT_V2_SELECTIONS = ("agent-style", "aa-core-skills")
 #
 # Keep in sync with ``hosts:`` declarations in bootstrap/packs.yaml. A
 # bundled default that gates on host needs an entry here.
-_CLAUDE_ONLY_DEFAULTS: frozenset[str] = frozenset({"aa-core-skills"})
+_CLAUDE_ONLY_DEFAULTS: frozenset[str] = frozenset()
 
 
 # Mirrors ``compose_packs.KNOWN_HOSTS``. Kept as a literal here to avoid

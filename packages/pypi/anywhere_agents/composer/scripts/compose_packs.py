@@ -52,6 +52,7 @@ if str(_REPO_ROOT) not in sys.path:
 # regression test that pins the chosen form.
 import compose_rule_packs as legacy  # noqa: E402
 from packs import auth  # noqa: E402
+from packs import codex_links  # noqa: E402
 from packs import config as config_mod  # noqa: E402
 from packs import dirhash  # noqa: E402
 from packs import dispatch  # noqa: E402
@@ -599,6 +600,7 @@ def print_compose_summary(
     pending_updates,
     host: str,
     noise_warnings=None,
+    codex_link_line: str | None = None,
 ) -> None:
     """Print a concise per-pack outcome line, host, + pending-update hint.
 
@@ -610,7 +612,10 @@ def print_compose_summary(
     third-party hook noise-budget report from
     :func:`packs.noise_budget.evaluate_noise_budget`; non-empty triggers
     a multiline warnings block after the host line so consumers see why
-    a third-party pack tripped the gate.
+    a third-party pack tripped the gate. ``codex_link_line`` is the
+    one-line result of the post-commit ``.agents/skills`` link pass
+    (:func:`packs.codex_links.LinkReport.summary_line`), printed after
+    the host line when present.
     """
     # TODO(v0.6.0 Phase 4): emit stderr summary line on update_policy:auto
     # silent refresh (passive pack's resolved commit changed and was applied
@@ -625,6 +630,8 @@ def print_compose_summary(
         outcome = outcomes.get(name, "no change")
         print(f"  {name:20s} {outcome}")
     print(f"\nHost: {host}")
+    if codex_link_line:
+        print(codex_link_line)
     if pending_updates:
         count = len(pending_updates)
         plural = "" if count == 1 else "s"
@@ -720,7 +727,9 @@ DEFAULT_V2_SELECTION_NAMES: frozenset[str] = frozenset(
 #
 # Keep in sync with ``hosts:`` declarations in bootstrap/packs.yaml. A
 # bundled default that gates on host needs an entry here.
-_CLAUDE_ONLY_DEFAULTS: frozenset[str] = frozenset({"aa-core-skills"})
+# aa-core-skills declares ``hosts: [claude-code, codex]`` since the Codex
+# skill links shipped, so no bundled default is Claude-only today.
+_CLAUDE_ONLY_DEFAULTS: frozenset[str] = frozenset()
 
 
 def _default_v2_selections_for_host(host: str) -> list[dict[str, str]]:
@@ -1778,11 +1787,15 @@ def _do_compose_v2(
         for selection, pack, _archive, _recorded in resolved
         if pack.get("passive")
     }
+    # Skills whose effective hosts include codex, collected by the skill
+    # handler across every pack; linked under .agents/skills after commit.
+    codex_eligible_skills: set[str] = set()
     try:
         with txn_mod.Transaction(staging_dir, lock_path) as txn:
             for selection, pack, archive, recorded in resolved:
                 ctx = _build_ctx(
                     root=root,
+                    codex_eligible_skills=codex_eligible_skills,
                     pack=pack,
                     selection=selection,
                     txn=txn,
@@ -1989,6 +2002,13 @@ def _do_compose_v2(
     # prior pack add, team-clone first run, manual deploy).
     print_adoption_summary(txn.adopted_paths)
 
+    # ----- post-commit: Codex skill links -----
+    # Codex reads repository skills only from .agents/skills/. Link each
+    # committed codex-eligible skill there, still under the repo lock the
+    # transaction used. Filesystem problems are reported in the summary
+    # and never fail the compose, because the transaction has committed.
+    codex_link_report = codex_links.sync_links(root, codex_eligible_skills)
+
     # ----- Phase 8 post-commit: pending-updates.json invariant -----
     # Round 3 M4: clear pending-updates.json on every apply path AND on
     # the no-drift path so a stale file cannot mislead the next session.
@@ -2106,6 +2126,7 @@ def _do_compose_v2(
         deferred_for_summary,
         host=host,
         noise_warnings=noise_warnings,
+        codex_link_line=codex_link_report.summary_line(),
     )
 
     return 0
@@ -2124,6 +2145,7 @@ def _build_ctx(
     archive: Any = None,
     archive_dir: Path | None = None,
     previous_lock_entry: dict[str, Any] | None = None,
+    codex_eligible_skills: set[str] | None = None,
 ) -> dispatch.DispatchContext:
     """Assemble a DispatchContext for one pack's composition.
 
@@ -2216,7 +2238,7 @@ def _build_ctx(
         pack_fetched_at = None
 
     # Pack-level hosts default (pack-architecture.md:199) is explicitly
-    # threaded into the context so dispatch._effective_hosts() can
+    # threaded into the context so dispatch.effective_hosts() can
     # inherit it when an active entry omits its own hosts:.
     pack_hosts_default = pack.get("hosts")
 
@@ -2238,6 +2260,7 @@ def _build_ctx(
         current_host=host,
         pack_latest_known_head=pack_latest_known_head,
         pack_fetched_at=pack_fetched_at,
+        codex_eligible_skills=codex_eligible_skills,
     )
 
 

@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import codex_links
 from . import dirhash
 from . import locks
 from . import state as state_mod
@@ -96,8 +97,14 @@ def run_uninstall_all(
     project_state_path = project_root / ".agent-config" / "pack-state.json"
     user_state_path = user_home / ".claude" / "pack-state.json"
 
-    # No-op: nothing recorded.
-    if not project_lock_path.exists() and not project_state_path.exists():
+    # No-op: nothing recorded. A Codex link record alone still needs the
+    # locked cleanup pass, so a retry after a crash between the state
+    # write and the link cleanup removes a dangling link.
+    if (
+        not project_lock_path.exists()
+        and not project_state_path.exists()
+        and not codex_links.has_record(project_root)
+    ):
         return UninstallOutcome(status=STATUS_NO_OP)
 
     # Acquire locks before touching any state.
@@ -107,7 +114,7 @@ def run_uninstall_all(
     try:
         with locks.acquire(user_lock, timeout=lock_timeout) as _user_h:
             with locks.acquire(repo_lock, timeout=lock_timeout) as _repo_h:
-                return _uninstall_under_locks(
+                outcome = _uninstall_under_locks(
                     project_root=project_root,
                     user_home=user_home,
                     repo_id=repo_id,
@@ -115,12 +122,52 @@ def run_uninstall_all(
                     project_state_path=project_state_path,
                     user_state_path=user_state_path,
                 )
+                _prune_codex_links(
+                    project_root, outcome, remove_record_when_empty=True
+                )
+                return outcome
     except locks.LockTimeout as exc:
         return UninstallOutcome(
             status=STATUS_LOCK_TIMEOUT,
             details=[str(exc)],
             lock_holder_pid=exc.holder_pid,
         )
+
+
+def _prune_codex_links(
+    project_root: Path,
+    outcome: UninstallOutcome,
+    *,
+    remove_record_when_empty: bool,
+) -> None:
+    """Clean up Codex skill links after the output walk, whatever its result.
+
+    The walk deletes skill directories one at a time and can stop on
+    drift, so cleanup removes only recorded ``.agents/skills`` links whose
+    ``.claude/skills/<name>`` no longer exists (``packs.codex_links``).
+    The links never reach ``_delete_project_local``, whose ``resolve()``
+    plus ``shutil.rmtree`` would follow a link into ``.claude/skills``.
+    """
+    report = codex_links.prune_links(
+        project_root, remove_record_when_empty=remove_record_when_empty
+    )
+    if report.removed:
+        outcome.details.append(
+            "removed Codex skill link(s): "
+            + ", ".join(f".agents/skills/{name}" for name in report.removed)
+        )
+    if report.record_removed:
+        outcome.details.append("removed .agents/skills/.gitignore")
+    if (report.removed or report.record_removed) and outcome.status == STATUS_NO_OP:
+        outcome.status = STATUS_CLEAN
+    if report.skipped:
+        outcome.details.append(
+            f"Codex skill link cleanup incomplete: {report.skipped}"
+        )
+        if outcome.status in (STATUS_NO_OP, STATUS_CLEAN):
+            outcome.status = STATUS_PARTIAL
+    for name, reason in report.left_alone:
+        outcome.details.append(f"Codex skill link {name} left alone: {reason}")
 
 
 def _uninstall_under_locks(
@@ -433,8 +480,12 @@ def run_uninstall_pack(
     project_state_path = project_root / ".agent-config" / "pack-state.json"
     user_state_path = user_home / ".claude" / "pack-state.json"
 
-    # No-op: nothing recorded.
-    if not project_lock_path.exists() and not project_state_path.exists():
+    # No-op: nothing recorded (see run_uninstall_all for the link record).
+    if (
+        not project_lock_path.exists()
+        and not project_state_path.exists()
+        and not codex_links.has_record(project_root)
+    ):
         return UninstallOutcome(status=STATUS_NO_OP)
 
     # Acquire locks before touching any state.
@@ -444,7 +495,7 @@ def run_uninstall_pack(
     try:
         with locks.acquire(user_lock, timeout=lock_timeout) as _user_h:
             with locks.acquire(repo_lock, timeout=lock_timeout) as _repo_h:
-                return _uninstall_pack_under_locks(
+                outcome = _uninstall_pack_under_locks(
                     project_root=project_root,
                     user_home=user_home,
                     repo_id=repo_id,
@@ -453,6 +504,10 @@ def run_uninstall_pack(
                     project_state_path=project_state_path,
                     user_state_path=user_state_path,
                 )
+                _prune_codex_links(
+                    project_root, outcome, remove_record_when_empty=False
+                )
+                return outcome
     except locks.LockTimeout as exc:
         return UninstallOutcome(
             status=STATUS_LOCK_TIMEOUT,

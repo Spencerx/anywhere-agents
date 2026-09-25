@@ -36,12 +36,15 @@ packs:
       editable-figure PPTX deliverable needs desktop PowerPoint on
       Windows or macOS, and the skill checks that capability at
       invocation rather than the manifest gating install.
+      Declaring codex links each skill directory under .agents/skills/
+      on macOS and Linux, where Codex discovers repository skills
+      (scripts/packs/codex_links.py).
       The pointer files remain in the aa source tree
       during v0.4.0 (see pack-architecture.md § "Pack-emitted command
       pointers") and are pack-emitted to consumer's .claude/commands/
       alongside the skill directories.
     update_policy: prompt
-    hosts: [claude-code]
+    hosts: [claude-code, codex]
     active:
       - kind: skill
         files:

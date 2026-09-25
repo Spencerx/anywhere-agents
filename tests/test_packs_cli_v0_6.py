@@ -1697,11 +1697,21 @@ class TestVerifySeedHostAware(unittest.TestCase):
         seed = cli._default_v2_seed_for_host("claude-code")
         self.assertEqual(set(seed), {"agent-style", "aa-core-skills"})
 
-    def test_seed_for_codex_drops_aa_core_skills(self) -> None:
-        """Under codex the seed drops aa-core-skills (the only
-        claude-only v0.6.0 default); agent-style survives."""
+    def test_seed_for_codex_keeps_dual_host_aa_core_skills(self) -> None:
+        """aa-core-skills declares codex, so the codex seed keeps it
+        beside agent-style."""
         from anywhere_agents import cli
         seed = cli._default_v2_seed_for_host("codex")
+        self.assertEqual(set(seed), {"agent-style", "aa-core-skills"})
+
+    def test_seed_for_codex_drops_names_in_claude_only_set(self) -> None:
+        """A default listed in ``_CLAUDE_ONLY_DEFAULTS`` is still dropped
+        from the codex seed; agent-style survives."""
+        from anywhere_agents import cli
+        with patch.object(
+            cli, "_CLAUDE_ONLY_DEFAULTS", frozenset({"aa-core-skills"})
+        ):
+            seed = cli._default_v2_seed_for_host("codex")
         self.assertEqual(set(seed), {"agent-style"})
 
     def test_full_default_tuple_unchanged_for_identity_checks(self) -> None:
@@ -1717,8 +1727,9 @@ class TestVerifySeedHostAware(unittest.TestCase):
 
 class TestLoadProjectObservationsHostAware(unittest.TestCase):
     """Integration: ``_load_project_observations`` materializes the
-    project-side identity list. Under codex with no project signal,
-    aa-core-skills must not appear; under claude-code it must.
+    project-side identity list. With no project signal, both hosts
+    list aa-core-skills now that it declares codex; a Claude-only
+    default would appear under claude-code only.
 
     Pre-fix v0.6.0 behavior: codex consumers got aa-core-skills in
     the project view and verify reported "missing" because the
@@ -1732,13 +1743,13 @@ class TestLoadProjectObservationsHostAware(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
 
-    def test_observations_under_codex_exclude_claude_only(self) -> None:
+    def test_observations_under_codex_include_dual_host_default(self) -> None:
         from anywhere_agents import cli
         with patch.dict(os.environ, {"AGENT_CONFIG_HOST": "codex"}):
             obs = cli._load_project_observations(self.root)
         names = {ident[0] for ident in obs}
         self.assertIn("agent-style", names)
-        self.assertNotIn("aa-core-skills", names)
+        self.assertIn("aa-core-skills", names)
 
     def test_observations_under_claude_code_include_both(self) -> None:
         from anywhere_agents import cli

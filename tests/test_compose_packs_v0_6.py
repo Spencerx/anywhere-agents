@@ -840,11 +840,12 @@ class TestDefaultV2SelectionsForHost(unittest.TestCase):
     """``_default_v2_selections_for_host`` filters claude-only bundled
     defaults out of the seed list under non-claude hosts.
 
-    aa-core-skills declares ``hosts: [claude-code]`` in
-    ``bootstrap/packs.yaml``; if the seed is not host-aware, a fresh
-    codex consumer running bare ``anywhere-agents`` hits a hard
-    host-mismatch error on the canonical command. This is the unit
-    test for the filter helper. Compose-level wiring is exercised by
+    A Claude-only default in the seed would make a fresh codex consumer
+    running bare ``anywhere-agents`` hit a hard host-mismatch error on
+    the canonical command. aa-core-skills now declares
+    ``hosts: [claude-code, codex]`` (Codex skill links), so no bundled
+    default is Claude-only today; the filter is still exercised with a
+    patched set. Compose-level wiring is exercised by
     ``TestComposeUnderCodexHostSkipsClaudeOnlyDefaults`` below.
     """
 
@@ -855,20 +856,38 @@ class TestDefaultV2SelectionsForHost(unittest.TestCase):
         names = [sel["name"] for sel in result]
         self.assertEqual(names, ["agent-style", "aa-core-skills"])
 
-    def test_codex_drops_aa_core_skills(self) -> None:
-        """Codex host drops the claude-only aa-core-skills from the
-        seed; agent-style (host-agnostic) survives."""
+    def test_codex_keeps_dual_host_aa_core_skills(self) -> None:
+        """aa-core-skills declares codex, so the codex seed keeps it
+        beside the host-agnostic agent-style."""
         result = compose_packs._default_v2_selections_for_host("codex")
         names = [sel["name"] for sel in result]
-        self.assertEqual(names, ["agent-style"])
-        self.assertNotIn("aa-core-skills", names)
+        self.assertEqual(names, ["agent-style", "aa-core-skills"])
 
-    def test_unknown_host_drops_claude_only(self) -> None:
-        """Future non-claude hosts (treated as non-claude here) drop
-        claude-only defaults too; the filter is fail-safe."""
-        result = compose_packs._default_v2_selections_for_host("future-host")
-        names = [sel["name"] for sel in result]
-        self.assertNotIn("aa-core-skills", names)
+    def test_non_claude_host_drops_names_in_claude_only_set(self) -> None:
+        """A default listed in ``_CLAUDE_ONLY_DEFAULTS`` is dropped under
+        codex and under future non-claude hosts; the filter is
+        fail-safe."""
+        with patch.object(
+            compose_packs, "_CLAUDE_ONLY_DEFAULTS", frozenset({"aa-core-skills"})
+        ):
+            for host in ("codex", "future-host"):
+                result = compose_packs._default_v2_selections_for_host(host)
+                names = [sel["name"] for sel in result]
+                self.assertEqual(names, ["agent-style"], host)
+
+    def test_claude_only_set_matches_manifest_hosts(self) -> None:
+        """``_CLAUDE_ONLY_DEFAULTS`` must list exactly the bundled
+        defaults whose pack-level hosts omit codex (the comment above
+        the set asks to keep the two in sync)."""
+        from packs import schema
+        manifest = schema.parse_manifest(ROOT / "bootstrap" / "packs.yaml")
+        packs_by_name = {p["name"]: p for p in manifest.get("packs", [])}
+        claude_only = {
+            name
+            for name in compose_packs.DEFAULT_V2_SELECTION_NAMES
+            if "codex" not in (packs_by_name[name].get("hosts") or ["codex"])
+        }
+        self.assertEqual(set(compose_packs._CLAUDE_ONLY_DEFAULTS), claude_only)
 
     def test_full_list_unchanged_for_identity_lookups(self) -> None:
         """``DEFAULT_V2_SELECTION_NAMES`` is the identity-lookup set
@@ -881,11 +900,12 @@ class TestDefaultV2SelectionsForHost(unittest.TestCase):
 
 class TestComposeUnderCodexHostSkipsClaudeOnlyDefaults(unittest.TestCase):
     """Integration: compose with ``AGENT_CONFIG_HOST=codex`` and a
-    minimal default config does NOT pre-seed ``aa-core-skills``, so
-    the host-mismatch error path in ``packs/dispatch.py`` is never
-    reached. Pre-fix v0.6.0 behavior: bare ``anywhere-agents`` errored
-    on first run for codex consumers because the default seed always
-    included aa-core-skills regardless of host."""
+    minimal default config seeds only defaults that the codex host can
+    deploy, so the host-mismatch error path in ``packs/dispatch.py`` is
+    never reached. Pre-fix v0.6.0 behavior: bare ``anywhere-agents``
+    errored on first run for codex consumers because the default seed
+    included the then Claude-only aa-core-skills regardless of host.
+    aa-core-skills now declares codex, so the codex seed includes it."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -904,10 +924,10 @@ class TestComposeUnderCodexHostSkipsClaudeOnlyDefaults(unittest.TestCase):
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
 
-    def test_resolved_for_project_under_codex_excludes_aa_core_skills(self) -> None:
+    def test_resolved_for_project_under_codex_includes_dual_host_defaults(self) -> None:
         """Direct check: the resolver, called with the host-filtered
-        default selection, returns only agent-style for an empty
-        consumer config under codex."""
+        default selection, returns agent-style and the dual-host
+        aa-core-skills for an empty consumer config under codex."""
         from packs import config as config_mod
         # Empty project config = no signal, defaults seed.
         selections = config_mod.resolved_for_project(
@@ -917,7 +937,7 @@ class TestComposeUnderCodexHostSkipsClaudeOnlyDefaults(unittest.TestCase):
         )
         names = {sel["name"] for sel in selections}
         self.assertIn("agent-style", names)
-        self.assertNotIn("aa-core-skills", names)
+        self.assertIn("aa-core-skills", names)
 
 
 class TestRunScopedCaches(unittest.TestCase):
