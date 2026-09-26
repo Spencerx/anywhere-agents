@@ -11,6 +11,8 @@
 | `prun` | explicit parallel delegation / fan-out intent; not auto-routed by file type | Fan out independent task units to Agy workers while the session coordinates; no Claude subagents, and Codex is reserved for `/vet`; workers spend the Google AI pool and never commit or push |
 | `editable-figure` | "editable figure", "PowerPoint figure", "PPTX figure", "editable diagram". Completing a build needs desktop PowerPoint validation; without it, explain the limitation and offer `ci-mockup-figure` rather than substituting it | Analyze the source, study references for the document type, and design a paper, proposal, or README figure delivered as native editable PowerPoint objects with publication or web exports |
 
+Paper and proposal overview requests, including "overview figure", "Figure 1", "总览图", and "图 1", also load the `editable-figure` gallery for design preferences while retaining the requested output format. A data-analysis plot keeps its plotting workflow.
+
 The shipped routing table covers the six skills above. To add your own: in a **fork of this repo**, add rows to this file. In a **consuming project**, this file is overwritten on every bootstrap, so register project-local skills in a bootstrap-proof location instead: a `routing-table.local.md` at the repo root, or a `## Routing` section in `AGENTS.local.md`. The router merges those rows on top of this table at dispatch time (local rows win on conflict). See the `my-router` SKILL.md section "Extending the Router" for the full recipe.
 
 ## Extension Template

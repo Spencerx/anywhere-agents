@@ -42,6 +42,8 @@ When a figure request explicitly asks for PowerPoint or native editability, take
 
 See [`references/routing-table.md`](references/routing-table.md) for the current table and the extension template.
 
+For a paper or proposal overview, including "Figure 1", read `editable-figure/references/gallery/index.md` through the normal skill lookup and include relevant recorded preferences in the chosen figure workflow. Preserve the requested output format; reading the gallery does not require PowerPoint or change a prompt-only task into a figure build.
+
 ### 2. File types in working directory
 
 If prompt keywords are ambiguous, inspect the files being worked on. The shipped router recognizes staged git changes → `implement-review`, HTML mockup files for dashboards/timelines → `ci-mockup-figure`, a top-level `README.md` flagged for polish → `readme-polish`, and `.pptx` figure sources beside a paper, proposal, or README → `editable-figure`. Add your own file-type rules when you add new skills.
