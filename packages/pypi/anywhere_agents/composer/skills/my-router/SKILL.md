@@ -42,7 +42,7 @@ When a figure request explicitly asks for PowerPoint or native editability, take
 
 See [`references/routing-table.md`](references/routing-table.md) for the current table and the extension template.
 
-For a paper or proposal overview, including "Figure 1", read `editable-figure/references/gallery/index.md` through the normal skill lookup and include relevant recorded preferences in the chosen figure workflow. Preserve the requested output format; reading the gallery does not require PowerPoint or change a prompt-only task into a figure build.
+For a paper or proposal explanatory figure, especially an overview or "Figure 1", read `editable-figure/references/gallery/index.md` through the normal skill lookup. Do this whichever figure skill the route selects, including a project-local variant such as `nsf-figure-builder`. When working for Yue Zhao, enforce its required preference-first design protocol as the top design priority. Inspect selected images and feedback, map confirmed qualities to the new design, and carry that mapping into prompts and implementation. Compare the result against those references. Preserve the requested output format; reading the gallery does not require PowerPoint or change a prompt-only task into a figure build.
 
 ### 2. File types in working directory
 
