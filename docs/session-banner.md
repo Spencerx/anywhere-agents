@@ -7,7 +7,7 @@ Every session opens with a seven-line banner that says which agent versions are 
 ```text
 📦 anywhere-agents active
    ├── OS: win32
-   ├── Claude Code: 2.1.275 → 2.1.280 (auto-update: on) · <model> · effort=max
+   ├── Claude Code: 2.1.275 → 2.1.280 (auto-update: on) · <model> · effort=xhigh
    ├── Codex: 0.155.0 · gpt-6-astra · xhigh · standard · fast_mode=false
    ├── Skills: 1 local (paper-tools) + 2 pack (bibref-filler, dual-pass-workflow) + 6 shared (ci-mockup-figure, editable-figure, implement-review, my-router, prun, readme-polish)
    ├── Hooks: PreToolUse guard.py, SessionStart session_bootstrap.py
@@ -32,7 +32,7 @@ The agent replaces `<model>` with its own model id when it prints the banner, be
 The check line combines, in this order:
 
 1. The bootstrap ledger, `.agent-config/last-run.json`, in a consumer. A nonzero bootstrap exit reads `bootstrap exited N at <phase>`; a ledger with `completed: false` reads `bootstrap incomplete: stopped at <phase>`; each failed or skipped step is named with its reason and return code (`compose skipped (no PyYAML)`). A missing ledger reads `checks unavailable (no .agent-config/last-run.json)`. A zero exit alone never yields `all clear`.
-2. A missing hook, and a Claude effort other than `max`.
+2. A missing hook, and a Claude effort other than `xhigh` or `max`.
 3. Codex drift that is actionable: a model older than the GPT-5.6 family, or a CLI below the floor of the configured model generation. The floors are 0.144.0 for GPT-5.6 and 0.150.0 for GPT-6. A `config.toml` that is not valid TOML is named as such. A `project_doc_max_bytes` below 262144 is flagged with the value to set (see [Codex](codex.md)). The model, tier, and `fast_mode` values themselves are reported, never flagged.
 4. GitHub Actions pins in `.github/workflows/*.yml` below the minimums in `AGENTS.md` § "Environment" (`actions/checkout@v5`, `actions/setup-python@v6`, `actions/setup-node@v5`, `actions/upload-artifact@v6`, `actions/download-artifact@v7`), each with its file, line, and the version to bump to. A pin by commit SHA is listed for manual review rather than compared.
 5. Pack counts: `⚠ N user-level pack(s) not deployed` and `ℹ N pack update(s) available`, both with the `anywhere-agents pack verify --fix` reroute, or `pack checks unavailable (<reason>)`.

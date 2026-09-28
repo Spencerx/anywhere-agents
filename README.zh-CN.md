@@ -400,7 +400,7 @@ anywhere-agents/
 │   ├── commands/                  # pointer files so Claude Code discovers the skills
 │   └── settings.json              # project-level permissions
 ├── user/
-│   └── settings.json              # user-level permissions, PreToolUse + SessionStart hooks, CLAUDE_CODE_EFFORT_LEVEL=max
+│   └── settings.json              # user-level permissions, PreToolUse + SessionStart hooks, CLAUDE_CODE_EFFORT_LEVEL=xhigh
 ├── docs/                          # Read the Docs source + README hero assets
 ├── tests/                         # bootstrap / guard / generator / session-bootstrap tests (Ubuntu + Windows + macOS CI, Python 3.9-3.13)
 ├── .github/workflows/             # validate, real-agent-smoke, package-smoke CI

@@ -78,7 +78,7 @@ Invoke-WebRequest -UseBasicParsing -Uri https://raw.githubusercontent.com/yzhao0
 2. Sparse-clones `skills/`, `.claude/commands/`, `.claude/settings.json`, `scripts/guard.py`, `scripts/statusline.py`, `scripts/agent-quota.py`, and `user/settings.json` into `.agent-config/repo/`.
 3. Copies shared `.claude/commands/*.md` into the project's `.claude/commands/`. Non-destructive — does not delete unrelated local pointer files.
 4. Merges shared `.claude/settings.json` keys into the project's copy. Project-only keys are preserved.
-5. Installs `scripts/guard.py` into `~/.claude/hooks/`, installs `scripts/statusline.py` and `scripts/agent-quota.py` under `~/.claude/`, then merges `user/settings.json` into `~/.claude/settings.json` (hook wiring, statusLine command, `CLAUDE_CODE_EFFORT_LEVEL=max`, user-level permissions).
+5. Installs `scripts/guard.py` into `~/.claude/hooks/`, installs `scripts/statusline.py` and `scripts/agent-quota.py` under `~/.claude/`, then merges `user/settings.json` into `~/.claude/settings.json` (hook wiring, statusLine command, `CLAUDE_CODE_EFFORT_LEVEL=xhigh`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70`, user-level permissions).
 6. Appends `.agent-config/` to the project's `.gitignore` if not already present.
 
 ## Pack manifest schema (v0.6.0)
@@ -136,9 +136,11 @@ irm https://claude.ai/install.ps1 | iex
 
 Migrating from a package manager: run `npm uninstall -g @anthropic-ai/claude-code` or `winget uninstall Anthropic.ClaudeCode` first, then the native installer. Inside Claude Code, `/config` sets the release channel (`latest` or `stable`). `claude doctor` inspects the updater and `claude update` forces an immediate check. To disable auto-update, set `DISABLE_AUTOUPDATER=1` in the environment or add `"env": {"DISABLE_AUTOUPDATER": "1"}` to `~/.claude/settings.json`; the environment variable takes precedence over every other flag. The session banner reads the same signals to report `auto-update: on` or `off`.
 
-**Effort level.** Bootstrap installs `CLAUDE_CODE_EFFORT_LEVEL=max` into the `env` block of `~/.claude/settings.json` through the shared `user/settings.json`, so one bootstrap run on any consuming project lands the user-level default. A managed cap applies first. The `CLAUDE_CODE_EFFORT_LEVEL` environment variable then outranks `--effort` at launch and `/effort` inside a session, where the slash command warns that the variable is overriding the live effort. Without the variable, `--effort <level>` at launch lasts one session, `/effort <level>` saves the level for the current model, and `/effort max` lasts one session. When nothing is chosen, Claude checks settings files in precedence order, and the first file with an applicable level decides. Within one file, the level saved for the model wins over a top-level `effortLevel`. With no applicable level, Claude uses the model's own default, which differs by model. A top-level `effortLevel` in user settings does not apply to Opus 5.5 or later models; one in project, local, or managed settings does.
+**Effort level.** Bootstrap installs `CLAUDE_CODE_EFFORT_LEVEL=xhigh` into the `env` block of `~/.claude/settings.json` through the shared `user/settings.json`, so one bootstrap run on any consuming project lands the user-level default. A managed cap applies first. The `CLAUDE_CODE_EFFORT_LEVEL` environment variable then outranks `--effort` at launch and `/effort` inside a session, where the slash command warns that the variable is overriding the live effort. Without the variable, `--effort <level>` at launch lasts one session, `/effort <level>` saves the level for the current model, and `/effort max` lasts one session. When nothing is chosen, Claude checks settings files in precedence order, and the first file with an applicable level decides. Within one file, the level saved for the model wins over a top-level `effortLevel`. With no applicable level, Claude uses the model's own default, which differs by model. A top-level `effortLevel` in user settings does not apply to Opus 5.5 or later models; one in project, local, or managed settings does.
 
-The variable is the persistent form because the persisted key does not accept it. As of Claude Code v2.1.111 the `/effort` slider exposes `low`, `medium`, `high`, `xhigh`, and `max`, while the persisted `effortLevel` accepts the first four (v2.1.111 added `xhigh`). Selecting `max` through the slider therefore silently does not persist. To set the variable by hand:
+Claude reviews dispatched by `/vet` skip user settings and pass `--effort max`, so the daily default does not lower them. A `CLAUDE_CODE_EFFORT_LEVEL` inherited from the launching environment still takes precedence. Bootstrap rewrites the user-level value on every run. To keep one repository at `max`, set the variable in that repository's `.claude/settings.local.json` `env` block, which outranks user settings.
+
+The variable is the only persistent form of `max`. As of Claude Code v2.1.111 the `/effort` slider exposes `low`, `medium`, `high`, `xhigh`, and `max`, while the persisted `effortLevel` accepts the first four (v2.1.111 added `xhigh`). Selecting `max` through the slider therefore silently does not persist. Bootstrap uses the variable for the `xhigh` default as well, because a top-level `effortLevel` in user settings does not apply to Opus 5.5 or later. To set the variable by hand:
 
 ```bash
 # macOS / Linux: add to the env block of ~/.claude/settings.json
@@ -146,7 +148,7 @@ python3 - <<'EOF'
 import json, pathlib
 p = pathlib.Path.home() / ".claude" / "settings.json"
 data = json.loads(p.read_text()) if p.exists() else {}
-data.setdefault("env", {})["CLAUDE_CODE_EFFORT_LEVEL"] = "max"
+data.setdefault("env", {})["CLAUDE_CODE_EFFORT_LEVEL"] = "xhigh"
 p.write_text(json.dumps(data, indent=2) + "\n")
 EOF
 ```
@@ -156,11 +158,13 @@ EOF
 $p = Join-Path $env:USERPROFILE ".claude\settings.json"
 $data = if (Test-Path $p) { Get-Content $p -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
 if (-not $data.env) { $data | Add-Member -NotePropertyName env -NotePropertyValue ([pscustomobject]@{}) }
-$data.env | Add-Member -NotePropertyName CLAUDE_CODE_EFFORT_LEVEL -NotePropertyValue "max" -Force
+$data.env | Add-Member -NotePropertyName CLAUDE_CODE_EFFORT_LEVEL -NotePropertyValue "xhigh" -Force
 # WriteAllText with an explicit encoding: Set-Content -Encoding utf8 writes a
 # byte-order mark on Windows PowerShell 5.1, which a strict JSON reader rejects.
 [System.IO.File]::WriteAllText($p, ($data | ConvertTo-Json -Depth 10) + "`n", [System.Text.UTF8Encoding]::new($false))
 ```
+
+**Auto-compaction.** The same `env` block carries `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70`, which starts auto-compaction at 70% of the auto-compact window. A 1M-context model tunes that window to about 967K tokens, so compaction starts near 677K. Claude Code re-sends the whole conversation on every request, so a lower threshold keeps requests smaller on average. The variable only lowers the threshold; `/autocompact <tokens>` sets an absolute window per user instead.
 
 ### Codex
 
